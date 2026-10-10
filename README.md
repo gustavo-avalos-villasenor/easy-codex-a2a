@@ -90,6 +90,18 @@ Neither mode runs a status-polling loop. The Agent Card is:
 http://TAILSCALE-IP:8766/.well-known/agent-card.json
 ~~~
 
+To run resumed turns with GPT-5.6 Luna at low reasoning effort, set these
+variables before launching the bridge:
+
+~~~bash
+export A2A_CODEX_MODEL="gpt-5.6-luna"
+export A2A_CODEX_REASONING_EFFORT="low"
+~~~
+
+On Windows, use `$env:A2A_CODEX_MODEL = "gpt-5.6-luna"` and
+`$env:A2A_CODEX_REASONING_EFFORT = "low"`. `gpt-5.6-luna` is the official
+model ID; `luna-light` is not a separate model ID.
+
 ## Full documentation
 
 See HANDOFF.md for installation, protocol details, context and thread rules,

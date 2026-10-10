@@ -92,6 +92,8 @@ def ask_codex(
     thread_id: str,
     cwd: Path,
     timeout: int | None,
+    model: str | None,
+    reasoning_effort: str | None,
 ) -> str:
     """Resume exactly one existing thread and return its final response."""
 
@@ -109,9 +111,12 @@ def ask_codex(
             "--output-last-message",
             str(output),
             "resume",
-            thread_id,
-            "-",
         ]
+        if model:
+            command.extend(["--model", model])
+        if reasoning_effort:
+            command.extend(["--config", f'model_reasoning_effort="{reasoning_effort}"'])
+        command.extend([thread_id, "-"])
         process_timeout = None if timeout is None or timeout <= 0 else timeout
         try:
             result = subprocess.run(
@@ -187,12 +192,16 @@ class CodexExecutor(AgentExecutor):
         cwd: Path,
         timeout: int | None,
         demo: bool,
+        model: str | None,
+        reasoning_effort: str | None,
     ) -> None:
         self.thread_id = thread_id
         self.context_id = context_id
         self.cwd = cwd
         self.timeout = timeout
         self.demo = demo
+        self.model = model
+        self.reasoning_effort = reasoning_effort
         self.lock = asyncio.Lock()
 
     async def execute(self, context, event_queue) -> None:
@@ -244,6 +253,8 @@ class CodexExecutor(AgentExecutor):
                         self.thread_id,
                         self.cwd,
                         self.timeout,
+                        self.model,
+                        self.reasoning_effort,
                     )
 
             completed = new_text_status_update_event(
@@ -334,6 +345,8 @@ def create_app(
     cwd: Path,
     timeout: int | None,
     task_db: Path,
+    model: str | None,
+    reasoning_effort: str | None,
     demo: bool = False,
 ) -> Starlette:
     card = AgentCard(
@@ -364,7 +377,15 @@ def create_app(
             )
         ],
     )
-    executor = CodexExecutor(thread_id, context_id, cwd, timeout, demo)
+    executor = CodexExecutor(
+        thread_id,
+        context_id,
+        cwd,
+        timeout,
+        demo,
+        model,
+        reasoning_effort,
+    )
     database_url = f"sqlite+aiosqlite:///{task_db.as_posix()}"
     engine = create_async_engine(database_url)
     task_store = DatabaseTaskStore(engine)
@@ -411,6 +432,17 @@ def main() -> None:
         default=None,
         help="SQLite task database; defaults to CODEX_HOME/a2a-bridge/tasks.sqlite3.",
     )
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("A2A_CODEX_MODEL") or None,
+        help="Optional Codex model for resumed turns (for example gpt-5.6-luna).",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "high", "xhigh", "max"),
+        default=os.environ.get("A2A_CODEX_REASONING_EFFORT") or None,
+        help="Optional Codex reasoning effort for resumed turns.",
+    )
     parser.add_argument("--demo", action="store_true", help="echo sin llamar a Codex")
     args = parser.parse_args()
 
@@ -439,6 +471,10 @@ def main() -> None:
     print(f"A2A contextId:      {args.context_id}", flush=True)
     print(f"Working directory:   {cwd}", flush=True)
     print(f"Task database:       {task_db}", flush=True)
+    if args.model:
+        print(f"Codex model:         {args.model}", flush=True)
+    if args.reasoning_effort:
+        print(f"Reasoning effort:    {args.reasoning_effort}", flush=True)
     print(
         f"Agent Card:          {base_url}/.well-known/agent-card.json",
         flush=True,
@@ -455,6 +491,8 @@ def main() -> None:
             cwd,
             args.timeout,
             task_db,
+            args.model,
+            args.reasoning_effort,
             args.demo,
         ),
         host=args.host,

@@ -66,6 +66,22 @@ failed with an explicit recovery message instead of leaving it hanging or
 silently submitting it a second time. A client disconnect alone is safe and
 does not cancel the worker.
 
+The bridge can select the Codex model and reasoning effort for resumed turns
+without changing the user's global Codex configuration. Pass `--model` and
+`--reasoning-effort`, or set `A2A_CODEX_MODEL` and
+`A2A_CODEX_REASONING_EFFORT`. The official GPT-5.6 Luna model ID is
+`gpt-5.6-luna`; this CLI accepts reasoning efforts `none`, `low`, `medium`,
+`high`, `xhigh`, and `max`. If someone says “Luna Light”, use
+`gpt-5.6-luna` with `low`—there is no separate `luna-light` model ID.
+
+Example for the recommended safe launcher:
+
+~~~bash
+A2A_CODEX_MODEL="gpt-5.6-luna" \
+A2A_CODEX_REASONING_EFFORT="low" \
+./start-a2a-after-exit.sh UUID-OF-THE-CURRENT-CONVERSATION 8766 codex-CONTEXT-ID
+~~~
+
 Original A2A repository:
 
 ~~~text
@@ -359,6 +375,12 @@ If the conversation is already closed and there is no old daemon or lock, the br
 cd easy-codex-a2a
 TAILSCALE_IP="$(tailscale ip -4 | head -n 1)"
 .venv/bin/python a2a_bridge.py --host "$TAILSCALE_IP" --port 8766 --base-url "http://$TAILSCALE_IP:8766" --thread-id "CURRENT_THREAD_UUID" --context-id "CURRENT_CONTEXT_ID" --timeout 0
+~~~
+
+To select a model for this direct launch, append for example:
+
+~~~bash
+--model gpt-5.6-luna --reasoning-effort low
 ~~~
 
 Use start-a2a-after-exit.sh when there is any chance that Codex Desktop, VS Code, an old bridge, or an app-server daemon still owns the conversation.
@@ -717,6 +739,13 @@ Create the environment:
 py -3.10 -m venv .venv
 .venv/Scripts/python.exe -m pip install --upgrade pip
 .venv/Scripts/python.exe -m pip install -r requirements.txt
+~~~
+
+Optional model selection in PowerShell:
+
+~~~powershell
+$env:A2A_CODEX_MODEL = "gpt-5.6-luna"
+$env:A2A_CODEX_REASONING_EFFORT = "low"
 ~~~
 
 Use the PowerShell launcher already included in the repository:
