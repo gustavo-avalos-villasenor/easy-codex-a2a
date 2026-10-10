@@ -118,6 +118,33 @@ if curl --fail --max-time 3 -sS "$card_url" >/dev/null 2>&1; then
     exit 5
 fi
 
+echo
+echo "================ A2A connection instructions ================"
+echo "Repository:      https://github.com/gustavo-avalos-villasenor/easy-codex-a2a"
+echo "Agent Card:      $card_url"
+echo "JSON-RPC URL:    $base_url/"
+echo "A2A context ID:  $CONTEXT_ID"
+echo
+echo "Copy the following message to the remote agent:"
+cat <<EOF
+Clone and read this repository:
+https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
+
+The bridge is serving the existing Codex conversation. Do not create a new
+conversation. First read this Agent Card:
+$card_url
+
+Use the endpoint and contextId announced by the Agent Card. Send A2A 1.0
+JSON-RPC requests with method SendMessage, one at a time. Generate new request
+and message UUIDs for every request. Wait up to 300 seconds and inspect the
+JSON-RPC body for errors even when HTTP status is 200. Do not retry blindly
+after a timeout.
+
+From the cloned repository, a test message can be sent with:
+python3 a2a_client.py "Hello. Please confirm that you received this message." "$base_url"
+EOF
+echo "=============================================================="
+echo
 echo "A2A bridge in foreground: $base_url"
 echo "The process will remain in standby waiting for requests."
 echo "Press Ctrl+C in this terminal to stop it."

@@ -32,7 +32,7 @@ python3 -m venv .venv
 ~~~
 
 5. Keep that terminal open. It is intentionally occupied in standby.
-6. Give the remote agent the Agent Card URL printed by the launcher.
+6. Copy the connection instructions printed by the launcher and send them to the remote agent.
 7. When finished, press Ctrl+C in the bridge terminal.
 
 For the current conversation, use the UUID supplied by the Codex runtime. The

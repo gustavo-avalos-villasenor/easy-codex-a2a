@@ -284,6 +284,10 @@ Pulsa Ctrl+C en esta terminal para detenerlo.
 
 The terminal must remain occupied. This is intentional: the bridge is alive and waiting.
 
+The launcher prints a copy-ready connection block before entering standby. It
+includes the repository URL, Agent Card URL, JSON-RPC URL, context ID, and a
+message that can be forwarded to the remote agent.
+
 Share the following with the remote agent:
 
 ~~~text
