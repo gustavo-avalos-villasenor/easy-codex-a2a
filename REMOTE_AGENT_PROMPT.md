@@ -5,13 +5,18 @@ Send the following message to an agent that has no prior context:
 ~~~text
 Clone and read this repository first:
 https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
-After cloning, select the async-resume-callback branch:
-git fetch origin async-resume-callback
-git switch --track origin/async-resume-callback
+The default main branch is the canonical version and already includes the
+asynchronous callback workflow. Do not switch to an older branch.
 
 It contains the complete A2A bridge for an existing Codex conversation,
 including the upstream A2A repository reference, Python bridge, client,
 Linux launchers, Windows launcher, and HANDOFF.md.
+
+There are two cooperating sides. The server/worker agent owns one existing
+Codex conversation and runs the foreground bridge. This client agent submits
+tasks and, for long work, uses a detached watcher that resumes this client
+conversation once with the final result. The workflow is asynchronous
+request/result communication; it is not a fully symmetric peer chat.
 
 The server-side Codex agent must use the same conversation in which this
 setup is being mounted. Do not create a new Codex conversation and do not

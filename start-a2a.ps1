@@ -40,7 +40,7 @@ $arguments = @(
 Write-Host ""
 Write-Host "================ A2A connection instructions ================"
 Write-Host "Repository:      https://github.com/gustavo-avalos-villasenor/easy-codex-a2a"
-Write-Host "Branch:          async-resume-callback"
+Write-Host "Branch:          main (asynchronous callback workflow)"
 Write-Host "Agent Card:      $cardUrl"
 Write-Host "JSON-RPC URL:    $baseUrl/"
 Write-Host "A2A context ID:  $ContextId"
@@ -49,9 +49,7 @@ Write-Host "Copy this message to the remote agent:"
 Write-Host @"
 Clone and read this repository:
 https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
-Then select the async-resume-callback branch:
-git fetch origin async-resume-callback
-git switch --track origin/async-resume-callback
+The default main branch already contains the asynchronous callback workflow.
 
 Read the Agent Card first:
 $cardUrl

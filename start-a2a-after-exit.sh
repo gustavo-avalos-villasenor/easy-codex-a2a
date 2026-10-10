@@ -129,9 +129,7 @@ echo "Copy the following message to the remote agent:"
 cat <<EOF
 Clone and read this repository:
 https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
-Then select the async-resume-callback branch:
-git fetch origin async-resume-callback
-git switch --track origin/async-resume-callback
+The default main branch already contains the asynchronous callback workflow.
 
 The bridge is serving the existing Codex conversation. Do not create a new
 conversation. First read this Agent Card:
@@ -156,9 +154,6 @@ python3 a2a_client.py --wait "TASK-ID-FROM-SUBMIT" "$base_url"
 
 For a normal one-connection request:
 python3 a2a_client.py "Hello. Please confirm that you received this message." "$base_url"
-
-For a detached request that resumes the caller automatically:
-python3 a2a_client.py --submit-and-resume "Long task" "$base_url" "CLIENT-CODEX-CONVERSATION-UUID"
 EOF
 echo "=============================================================="
 echo

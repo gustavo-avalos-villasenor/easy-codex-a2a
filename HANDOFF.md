@@ -2,19 +2,18 @@
 
 This is the complete operational handoff for exposing one existing Codex conversation as a remote A2A agent.
 
-This document describes the `async-resume-callback` branch. It is intentionally
-separate from `main`, `async-tasks`, and `durable-async-tasks`, so the previous
-implementations remain available as rollback points. This branch is the version
-to use when long-running work must not keep the calling Codex agent in a model
-turn while it waits.
+The asynchronous callback implementation is the canonical version on `main`.
+It is the version to use when long-running work must not keep the calling Codex
+agent in a model turn while it waits. The older `async-resume-callback`,
+`async-tasks`, and `durable-async-tasks` branches remain available as historical
+rollback/reference points.
 
-When cloning from GitHub, explicitly select this branch:
+Clone the repository normally; GitHub's default branch already contains the
+callback workflow:
 
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin async-resume-callback
-git switch --track origin/async-resume-callback
 ~~~
 
 The remote agent can send messages to the existing Codex conversation and receive Codex replies directly. The user does not need to copy messages between agents after the bridge is running.
@@ -56,6 +55,14 @@ The bridge:
 - Listens only on the server's Tailscale IP.
 - Runs in the foreground and stays waiting for requests.
 - Stops with Ctrl+C in the terminal running the bridge.
+
+The communication has two cooperating sides. The server/worker side owns the
+existing Codex conversation and performs the requested work. The client side
+submits the A2A task and, in the recommended callback mode, runs a detached
+watcher that resumes the client's own Codex conversation once with the final
+result. This is bidirectional request/result communication, but it is not a
+fully symmetric peer chat: the worker does not spontaneously start a new client
+conversation, and writes to the one exposed worker conversation are serialized.
 
 The Codex subprocess timeout is unlimited by default. `--timeout 0` means no
 limit; a positive value is an optional safety limit in seconds. In callback
@@ -195,7 +202,7 @@ File roles:
 - HANDOFF.md: this complete operational document.
 - REMOTE_AGENT_PROMPT.md: copy-paste message for an agent with no prior context.
 
-This branch uses the A2A SDK's streaming/task support and SQLite task store. The upstream
+The main branch uses the A2A SDK's streaming/task support and SQLite task store. The upstream
 protocol repository used for this implementation is:
 
 ~~~text
@@ -209,8 +216,6 @@ This GitHub repository is the complete custom bundle. Clone it first:
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin async-resume-callback
-git switch --track origin/async-resume-callback
 ~~~
 
 The upstream A2A repository is a protocol and SDK reference. It is not a
@@ -254,8 +259,6 @@ Clone this repository, which contains the complete custom bridge bundle:
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin async-resume-callback
-git switch --track origin/async-resume-callback
 ~~~
 
 The original A2A repository is optional. Clone it separately only if its source

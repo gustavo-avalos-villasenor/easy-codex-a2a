@@ -1,8 +1,8 @@
 # Easy Codex A2A
 
 This repository exposes one existing Codex conversation as a durable A2A 1.0
-agent over a private Tailscale connection. The `async-resume-callback` branch
-adds a callback mode to the durable task implementation:
+agent over a private Tailscale connection. The default `main` branch includes
+the asynchronous callback workflow for long-running tasks:
 
 - `--submit-and-resume` returns immediately. A detached local watcher waits for
   the task outside the model turn and resumes the calling Codex conversation
@@ -16,15 +16,14 @@ There is no periodic status polling. Completed tasks persist in SQLite across
 bridge restarts. A task active during a bridge restart is marked failed on the
 next startup rather than silently duplicated.
 
-Use branch `async-resume-callback`; `main` remains the original rollback version,
-`async-tasks` is the earlier streaming-only version, and
-`durable-async-tasks` is the previous durable version:
+Use the repository's default `main` branch. The callback implementation was
+promoted from `async-resume-callback` after the long-task test succeeded. The
+older `async-resume-callback`, `async-tasks`, and `durable-async-tasks` branches
+are historical rollback/reference points only.
 
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin async-resume-callback
-git switch --track origin/async-resume-callback
 ~~~
 
 Repository used for the protocol and SDK:
@@ -34,6 +33,20 @@ https://github.com/a2aproject/a2a
 This repository contains the custom bridge that connects that protocol to
 Codex CLI. A new agent with no prior context should read HANDOFF.md
 completely before running anything.
+
+## Communication model
+
+The server/worker agent owns the existing Codex conversation and runs the
+foreground bridge. The remote/client agent sends A2A tasks and, for long work,
+uses `--submit-and-resume`; a detached watcher waits outside the client model
+turn and resumes that client conversation once with the final result.
+
+This is asynchronous request/result communication, not two independent
+Codex conversations writing to each other spontaneously. The server processes
+one request at a time against its one exposed conversation. The client can
+send more sequential requests after each result. `curl` and the `--submit` /
+`--wait` commands remain portable fallbacks for clients that cannot resume a
+Codex conversation.
 
 ## Quick start for the server user
 
