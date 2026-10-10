@@ -1,18 +1,27 @@
 # Easy Codex A2A
 
-This repository exposes one existing Codex conversation as an asynchronous
-A2A 1.0 agent over a private Tailscale connection.
+This repository exposes one existing Codex conversation as a durable A2A 1.0
+agent over a private Tailscale connection. The `durable-async-tasks` branch
+supports two safe waiting modes:
 
-The implementation in the `async-tasks` branch uses A2A tasks and one
-long-lived Server-Sent Events (SSE) response for each request. It does not
-poll task status, so a 21-minute Codex task is not followed by another
-20-minute status timeout.
+- `--submit` returns a task ID immediately. The bridge continues the Codex
+  work after the remote client exits; `--wait TASK_ID` attaches later over one
+  SSE connection.
+- The default client command sends one streaming request and keeps one SSE
+  connection open until completion.
 
-This handoff is for branch `async-tasks`; `main` remains the rollback version:
+There is no periodic status polling. Completed tasks persist in SQLite across
+bridge restarts. A task active during a bridge restart is marked failed on the
+next startup rather than silently duplicated.
+
+Use branch `durable-async-tasks`; `main` remains the original rollback version
+and `async-tasks` is the earlier streaming-only version:
 
 ~~~bash
-git fetch origin async-tasks
-git switch --track origin/async-tasks
+git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
+cd easy-codex-a2a
+git fetch origin durable-async-tasks
+git switch --track origin/durable-async-tasks
 ~~~
 
 Repository used for the protocol and SDK:
@@ -61,14 +70,21 @@ Do not use Ctrl+Z or pkill -f codex.
 Send the remote agent the contents of REMOTE_AGENT_PROMPT.md, together with
 the Tailscale IP printed by the server launcher.
 
-The remote agent can use the included standard-library client:
+For long or uncertain work, the remote agent should detach submission from
+waiting:
+
+~~~bash
+python3 a2a_client.py --submit "Long task for the Codex agent" "http://TAILSCALE-IP:8766"
+python3 a2a_client.py --wait "TASK-ID-FROM-SUBMIT" "http://TAILSCALE-IP:8766"
+~~~
+
+For a short request that can keep one connection open, use:
 
 ~~~bash
 python3 a2a_client.py "Hello. Please confirm that you received this message." "http://TAILSCALE-IP:8766"
 ~~~
 
-The command stays open on one SSE connection until Codex finishes. It does
-not issue repeated `GetTask` queries. The Agent Card is:
+Neither mode runs a status-polling loop. The Agent Card is:
 
 ~~~text
 http://TAILSCALE-IP:8766/.well-known/agent-card.json

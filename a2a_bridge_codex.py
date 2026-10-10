@@ -11,17 +11,20 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from contextlib import asynccontextmanager
 from uuid import UUID
 
+from sqlalchemy.ext.asyncio import create_async_engine
 import uvicorn
 
-from a2a.helpers.proto_helpers import new_text_status_update_event
+from a2a.helpers.proto_helpers import new_text_message, new_text_status_update_event
 from a2a.server.agent_execution import AgentExecutor
+from a2a.server.context import ServerCallContext
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
-from a2a.server.tasks import InMemoryTaskStore
+from a2a.server.tasks import DatabaseTaskStore
 from a2a.types import AgentCard, AgentCapabilities, AgentInterface, AgentSkill
-from a2a.types.a2a_pb2 import Task, TaskState, TaskStatus
+from a2a.types.a2a_pb2 import ListTasksRequest, Task, TaskState, TaskStatus
 from a2a.utils.errors import InvalidParamsError, UnsupportedOperationError
 from starlette.applications import Starlette
 
@@ -268,12 +271,69 @@ class CodexExecutor(AgentExecutor):
         )
 
 
+TERMINAL_TASK_STATES = frozenset(
+    {
+        TaskState.TASK_STATE_COMPLETED,
+        TaskState.TASK_STATE_FAILED,
+        TaskState.TASK_STATE_CANCELED,
+        TaskState.TASK_STATE_REJECTED,
+    }
+)
+
+
+async def recover_incomplete_tasks(
+    task_store: DatabaseTaskStore, context_id: str
+) -> int:
+    """Fail tasks left non-terminal by a previous bridge process.
+
+    A Codex turn cannot be resumed safely from the A2A task record alone:
+    resubmitting it could duplicate file changes or other side effects. Marking
+    it failed makes the interrupted state visible and prevents a reconnect
+    from hanging forever while pretending that an old worker still exists.
+    """
+
+    context = ServerCallContext()
+    page_token = ""
+    recovered = 0
+    while True:
+        params = ListTasksRequest(
+            context_id=context_id,
+            page_size=100,
+            page_token=page_token,
+        )
+        page = await task_store.list(params, context)
+        for task in page.tasks:
+            if task.status.state in TERMINAL_TASK_STATES:
+                continue
+
+            task.status.state = TaskState.TASK_STATE_FAILED
+            task.status.message.CopyFrom(
+                new_text_message(
+                    "The bridge restarted while this task was active. "
+                    "It was not resumed automatically. Inspect the Codex "
+                    "conversation before submitting the work again; do not "
+                    "duplicate a task that may already have caused side effects.",
+                    context_id=task.context_id,
+                    task_id=task.id,
+                )
+            )
+            await task_store.save(task, context)
+            recovered += 1
+
+        if not page.next_page_token:
+            break
+        page_token = page.next_page_token
+
+    return recovered
+
+
 def create_app(
     base_url: str,
     thread_id: str,
     context_id: str,
     cwd: Path,
     timeout: int | None,
+    task_db: Path,
     demo: bool = False,
 ) -> Starlette:
     card = AgentCard(
@@ -305,10 +365,30 @@ def create_app(
         ],
     )
     executor = CodexExecutor(thread_id, context_id, cwd, timeout, demo)
-    handler = DefaultRequestHandler(executor, InMemoryTaskStore(), card)
+    database_url = f"sqlite+aiosqlite:///{task_db.as_posix()}"
+    engine = create_async_engine(database_url)
+    task_store = DatabaseTaskStore(engine)
+    handler = DefaultRequestHandler(executor, task_store, card)
+
+    @asynccontextmanager
+    async def lifespan(_app: Starlette):
+        await task_store.initialize()
+        recovered = await recover_incomplete_tasks(task_store, context_id)
+        if recovered:
+            logging.warning(
+                "Marked %s task(s) failed because the previous bridge process stopped.",
+                recovered,
+            )
+        try:
+            yield
+        finally:
+            await handler.aclose()
+            await engine.dispose()
+
     return Starlette(
         routes=create_agent_card_routes(card)
-        + create_jsonrpc_routes(handler, "/")
+        + create_jsonrpc_routes(handler, "/"),
+        lifespan=lifespan,
     )
 
 
@@ -325,6 +405,12 @@ def main() -> None:
         default=0,
         help="Maximum Codex runtime in seconds; 0 means no limit (default).",
     )
+    parser.add_argument(
+        "--task-db",
+        type=Path,
+        default=None,
+        help="SQLite task database; defaults to CODEX_HOME/a2a-bridge/tasks.sqlite3.",
+    )
     parser.add_argument("--demo", action="store_true", help="echo sin llamar a Codex")
     args = parser.parse_args()
 
@@ -340,10 +426,19 @@ def main() -> None:
             f"No existe el directorio de trabajo de Codex: {cwd}"
         )
 
+    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    task_db = Path(
+        os.environ.get("A2A_TASK_DB")
+        or args.task_db
+        or (codex_home / "a2a-bridge" / "tasks.sqlite3")
+    )
+    task_db.parent.mkdir(parents=True, exist_ok=True)
+
     base_url = args.base_url.rstrip("/")
     print(f"Codex conversation: {thread_id}", flush=True)
     print(f"A2A contextId:      {args.context_id}", flush=True)
     print(f"Working directory:   {cwd}", flush=True)
+    print(f"Task database:       {task_db}", flush=True)
     print(
         f"Agent Card:          {base_url}/.well-known/agent-card.json",
         flush=True,
@@ -359,6 +454,7 @@ def main() -> None:
             args.context_id,
             cwd,
             args.timeout,
+            task_db,
             args.demo,
         ),
         host=args.host,

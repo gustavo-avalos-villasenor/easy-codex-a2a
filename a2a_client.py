@@ -1,12 +1,15 @@
-"""Send one message and wait on one A2A SSE stream until it is complete.
+"""Submit or follow one long-running A2A task without polling.
 
 Usage:
     python3 a2a_client.py "message" "http://TAILSCALE-IP:8766"
+    python3 a2a_client.py --submit "message" "http://TAILSCALE-IP:8766"
+    python3 a2a_client.py --wait TASK_ID "http://TAILSCALE-IP:8766"
 
-The client deliberately does not poll GetTask. It sends one
-SendStreamingMessage request and keeps that HTTP connection open until the
-bridge publishes a terminal task state. The wait therefore does not add a
-second timeout to the Codex operation.
+The default form follows the task on one SSE connection until completion.
+Use --submit when the caller must return immediately: the bridge keeps the
+task running after this process exits, and --wait can attach later by taskId.
+Neither mode polls GetTask. GetTask is used only once as a race-safe fallback
+when a task has already finished before a subscription is attached.
 """
 
 from __future__ import annotations
@@ -18,6 +21,10 @@ from collections.abc import Iterator
 from typing import Any, BinaryIO
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+
+class A2AProtocolError(RuntimeError):
+    """The server returned a JSON-RPC or task-stream error."""
 
 
 def read_agent_card(base_url: str) -> tuple[dict[str, Any], str, str]:
@@ -41,7 +48,7 @@ def read_agent_card(base_url: str) -> tuple[dict[str, Any], str, str]:
 
     if not card.get("capabilities", {}).get("streaming", False):
         raise SystemExit(
-            "This bridge does not advertise streaming; use the async branch of the bridge."
+            "This bridge does not advertise streaming; use the durable async branch."
         )
     return card, context_id, endpoint
 
@@ -91,7 +98,7 @@ def message_text(message: dict[str, Any] | None) -> str:
 
 
 def result_details(result: dict[str, Any]) -> tuple[str, str, bool]:
-    """Return (state, latest text, terminal) from one streamed A2A result."""
+    """Return (state, latest text, terminal) from one A2A result."""
 
     task = result.get("task")
     status_update = get_field(result, "statusUpdate", "status_update")
@@ -104,14 +111,16 @@ def result_details(result: dict[str, Any]) -> tuple[str, str, bool]:
     if isinstance(status_update, dict):
         status = status_update.get("status", {})
     if isinstance(status, dict):
-        text = message_text(get_field(status, "message", "message"))
+        text = message_text(status.get("message"))
         state = str(status.get("state", ""))
     else:
         state = ""
 
     if isinstance(artifact_update, dict):
         artifact = artifact_update.get("artifact", {})
-        artifact_parts = artifact.get("parts", []) if isinstance(artifact, dict) else []
+        artifact_parts = (
+            artifact.get("parts", []) if isinstance(artifact, dict) else []
+        )
         artifact_text = message_text({"parts": artifact_parts})
         if artifact_text:
             text = artifact_text
@@ -130,20 +139,185 @@ def result_details(result: dict[str, Any]) -> tuple[str, str, bool]:
     return state, text, terminal
 
 
-def send_and_wait(prompt: str, base_url: str) -> str:
-    _, context_id, endpoint = read_agent_card(base_url)
+def is_failure_state(state: str) -> bool:
+    normalized = state.upper()
+    return any(
+        normalized == suffix or normalized.endswith("_" + suffix)
+        for suffix in ("FAILED", "CANCELED", "CANCELLED", "REJECTED")
+    )
+
+
+def rpc_request(
+    endpoint: str,
+    method: str,
+    params: dict[str, Any],
+    timeout: float | None,
+) -> dict[str, Any]:
     body = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
-        "method": "SendStreamingMessage",
-        "params": {
-            "message": {
-                "messageId": str(uuid.uuid4()),
-                "role": "ROLE_USER",
-                "contextId": context_id,
-                "parts": [{"text": prompt}],
-            }
+        "method": method,
+        "params": params,
+    }
+    request = Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "A2A-Version": "1.0",
         },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.load(response)
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise SystemExit(f"Could not complete A2A {method}: {exc}") from exc
+
+    if "error" in payload:
+        raise A2AProtocolError(
+            json.dumps(payload["error"], ensure_ascii=False)
+        )
+    return payload
+
+
+def message_params(prompt: str, context_id: str) -> dict[str, Any]:
+    return {
+        "message": {
+            "messageId": str(uuid.uuid4()),
+            "role": "ROLE_USER",
+            "contextId": context_id,
+            "parts": [{"text": prompt}],
+        }
+    }
+
+
+def submit(prompt: str, base_url: str) -> str:
+    _, context_id, endpoint = read_agent_card(base_url)
+    params = message_params(prompt, context_id)
+    params["configuration"] = {"returnImmediately": True}
+    try:
+        payload = rpc_request(endpoint, "SendMessage", params, timeout=30)
+    except A2AProtocolError as exc:
+        raise SystemExit(f"A2A rejected the task: {exc}") from exc
+
+    task = payload.get("result", {}).get("task")
+    if not isinstance(task, dict) or not task.get("id"):
+        raise SystemExit("The bridge did not return a taskId for the submitted work.")
+
+    task_id = str(task["id"])
+    result = {
+        "taskId": task_id,
+        "contextId": task.get("contextId", context_id),
+        "state": task.get("status", {}).get("state", ""),
+    }
+    print(json.dumps(result, ensure_ascii=False))
+    print(
+        "Task accepted. To wait later without resubmitting it:",
+        file=sys.stderr,
+    )
+    interpreter = "py" if sys.platform == "win32" else "python3"
+    print(
+        f'{interpreter} a2a_client.py --wait "{task_id}" "{base_url}"',
+        file=sys.stderr,
+    )
+    return task_id
+
+
+def consume_stream(stream: BinaryIO) -> tuple[str, str]:
+    """Wait for one SSE stream and return its terminal state and text."""
+
+    latest_text = ""
+    for event_name, data in sse_events(stream):
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise A2AProtocolError(f"The bridge sent invalid SSE JSON: {data}") from exc
+
+        if event_name == "error" or "error" in payload:
+            raise A2AProtocolError(
+                json.dumps(payload.get("error", payload), ensure_ascii=False)
+            )
+
+        result = payload.get("result", {})
+        if not isinstance(result, dict):
+            continue
+        state, text, terminal = result_details(result)
+        if text:
+            latest_text = text
+        if terminal:
+            return state, latest_text
+
+    raise A2AProtocolError(
+        "The A2A stream closed before a terminal task state was received."
+    )
+
+
+def print_terminal(state: str, text: str) -> str:
+    if text:
+        print(text)
+    if is_failure_state(state):
+        raise SystemExit(1)
+    return text
+
+
+def send_and_wait(prompt: str, base_url: str) -> str:
+    _, context_id, endpoint = read_agent_card(base_url)
+    params = message_params(prompt, context_id)
+    params_body = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "SendStreamingMessage",
+        "params": params,
+    }
+    request = Request(
+        endpoint,
+        data=json.dumps(params_body).encode("utf-8"),
+        headers={
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+            "A2A-Version": "1.0",
+        },
+        method="POST",
+    )
+
+    # This is one long-lived wait, not a series of status requests. The
+    # timeout is intentionally unlimited after the stream is connected.
+    try:
+        with urlopen(request, timeout=None) as response:
+            try:
+                state, text = consume_stream(response)
+            except A2AProtocolError as exc:
+                raise SystemExit(
+                    f"A2A streaming request failed: {exc}. "
+                    "Do not resend automatically."
+                ) from exc
+            return print_terminal(state, text)
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise SystemExit(
+            f"Could not complete the A2A streaming request: {exc}. "
+            "Do not resend automatically; the task may still be running."
+        ) from exc
+
+
+def get_task_once(task_id: str, endpoint: str) -> dict[str, Any]:
+    try:
+        payload = rpc_request(endpoint, "GetTask", {"id": task_id}, timeout=10)
+    except A2AProtocolError as exc:
+        raise SystemExit(f"Could not read task {task_id}: {exc}") from exc
+    task = payload.get("result", {}).get("task") or payload.get("result")
+    if not isinstance(task, dict):
+        raise SystemExit(f"The bridge returned no task data for {task_id}.")
+    return task
+
+
+def wait_for_task(task_id: str, base_url: str) -> str:
+    _, _, endpoint = read_agent_card(base_url)
+    body = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "SubscribeToTask",
+        "params": {"id": task_id},
     }
     request = Request(
         endpoint,
@@ -156,62 +330,46 @@ def send_and_wait(prompt: str, base_url: str) -> str:
         method="POST",
     )
 
-    # timeout=None is intentional: this is one long-lived wait, not a series
-    # of 20-minute status requests. The server's Codex subprocess also has no
-    # limit by default, so a long task can finish naturally.
     try:
         with urlopen(request, timeout=None) as response:
-            final_text = ""
-            for event_name, data in sse_events(response):
-                try:
-                    payload = json.loads(data)
-                except json.JSONDecodeError as exc:
-                    raise SystemExit(f"The bridge sent invalid SSE JSON: {data}") from exc
-
-                if event_name == "error" or "error" in payload:
-                    raise SystemExit(
-                        "A2A returned an error: "
-                        + json.dumps(payload.get("error", payload), ensure_ascii=False)
-                    )
-
-                result = payload.get("result", {})
-                if not isinstance(result, dict):
-                    continue
-                state, text, terminal = result_details(result)
-                if text:
-                    final_text = text
+            try:
+                state, text = consume_stream(response)
+            except A2AProtocolError:
+                # A task may have reached a terminal state in the small gap
+                # between submission and subscription. Read it once instead
+                # of starting a polling loop or submitting the work again.
+                task = get_task_once(task_id, endpoint)
+                state, text, terminal = result_details({"task": task})
                 if terminal:
-                    if final_text:
-                        print(final_text)
-                    normalized_state = state.upper()
-                    if any(
-                        normalized_state.endswith("_" + suffix)
-                        or normalized_state == suffix
-                        for suffix in (
-                            "FAILED",
-                            "CANCELED",
-                            "CANCELLED",
-                            "REJECTED",
-                        )
-                    ):
-                        raise SystemExit(1)
-                    return final_text
-
-            raise SystemExit(
-                "The A2A stream closed before a terminal task state was received. "
-                "Do not resend automatically; check the bridge before retrying."
-            )
+                    return print_terminal(state, text)
+                raise
+            return print_terminal(state, text)
     except (HTTPError, URLError, TimeoutError) as exc:
         raise SystemExit(
-            f"Could not complete the A2A streaming request: {exc}. "
-            "Do not resend automatically until the task state is checked."
+            f"The task stream disconnected: {exc}. The taskId is {task_id}; "
+            "reattach with --wait instead of resubmitting the message."
+        ) from exc
+    except A2AProtocolError as exc:
+        raise SystemExit(
+            f"Could not follow task {task_id}: {exc}. "
+            "The task may still be running; do not resubmit it."
         ) from exc
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
+    args = sys.argv[1:]
+    if not args:
         raise SystemExit(__doc__)
-    send_and_wait(sys.argv[1], sys.argv[2].rstrip("/"))
+    if args[0] == "--submit" and len(args) == 3:
+        submit(args[1], args[2].rstrip("/"))
+        return
+    if args[0] == "--wait" and len(args) == 3:
+        wait_for_task(args[1], args[2].rstrip("/"))
+        return
+    if len(args) == 2:
+        send_and_wait(args[0], args[1].rstrip("/"))
+        return
+    raise SystemExit(__doc__)
 
 
 if __name__ == "__main__":

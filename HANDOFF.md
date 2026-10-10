@@ -2,17 +2,18 @@
 
 This is the complete operational handoff for exposing one existing Codex conversation as a remote A2A agent.
 
-This document describes the `async-tasks` branch. It is intentionally separate
-from `main`, so the synchronous implementation remains available as a rollback.
-The async branch is the version to use for long-running Codex work.
+This document describes the `durable-async-tasks` branch. It is intentionally
+separate from `main` and `async-tasks`, so both previous implementations remain
+available as rollback points. This durable branch is the version to use for
+long-running or disconnect-prone Codex work.
 
 When cloning from GitHub, explicitly select this branch:
 
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin async-tasks
-git switch --track origin/async-tasks
+git fetch origin durable-async-tasks
+git switch --track origin/durable-async-tasks
 ~~~
 
 The remote agent can send messages to the existing Codex conversation and receive Codex replies directly. The user does not need to copy messages between agents after the bridge is running.
@@ -22,12 +23,12 @@ The remote agent can send messages to the existing Codex conversation and receiv
 ~~~text
 Remote agent
     |
-    | One A2A 1.0 JSON-RPC SendStreamingMessage request
-    | over a private Tailscale connection; the HTTP response is SSE
+    | A2A 1.0 JSON-RPC submission over a private Tailscale connection
+    | returns a taskId immediately; a later SSE subscription follows it
     v
 Python A2A bridge on the Codex host
     |
-    | A2A Task lifecycle + one long-lived stream
+    | Persistent A2A Task store + independent worker
     | codex --no-daemon exec resume THREAD_UUID
     v
 The existing Codex conversation
@@ -36,13 +37,16 @@ The existing Codex conversation
 The bridge:
 
 - Publishes an A2A Agent Card.
-- Accepts A2A SendMessage and SendStreamingMessage JSON-RPC requests.
+- Accepts A2A SendMessage, SendStreamingMessage, SubscribeToTask, and GetTask
+  JSON-RPC requests.
 - Resumes one exact existing Codex conversation for every request.
-- Publishes a submitted/working task immediately and a completed or failed
-  task when Codex finishes.
-- Keeps a single SSE connection open until the terminal task state arrives.
-- Does not poll `GetTask` and does not add a second status timeout after the
-  Codex operation.
+- Publishes a submitted task immediately when the caller asks for
+  `returnImmediately`, then runs the worker independently until it publishes a
+  completed or failed task.
+- Keeps task execution independent from the HTTP client connection. A client
+  may disconnect after receiving a task ID without canceling the worker.
+- Persists task state in SQLite so a later client can reattach by task ID.
+- Uses one SSE subscription for waiting; it does not poll `GetTask`.
 - Serializes requests so only one request writes to the conversation at a time.
 - Listens only on the server's Tailscale IP.
 - Runs in the foreground and stays waiting for requests.
@@ -54,11 +58,13 @@ client also uses an unlimited read wait after the stream is connected. A
 twenty-one-minute Codex task therefore remains one twenty-one-minute request;
 there is no additional twenty-minute `GetTask` request afterward.
 
-Task metadata is held in the bridge's in-memory A2A task store. Keep the
-foreground process alive for the entire operation. The Codex conversation is
-on disk, but restarting the bridge does not provide durable recovery of an
-in-flight A2A task; after a crash or disconnect, inspect the conversation
-before sending the prompt again.
+Task metadata is stored in SQLite at `CODEX_HOME/a2a-bridge/tasks.sqlite3` by
+default. Set `A2A_TASK_DB` or pass `--task-db` to select another path. A
+completed task remains retrievable after a bridge restart. If the bridge is
+stopped while a worker is active, the next startup marks that non-terminal task
+failed with an explicit recovery message instead of leaving it hanging or
+silently submitting it a second time. A client disconnect alone is safe and
+does not cancel the worker.
 
 Original A2A repository:
 
@@ -153,9 +159,9 @@ File roles:
 
 - a2a_bridge_codex.py: actual A2A-to-Codex bridge.
 - a2a_bridge.py: wrapper entry point. Its filename intentionally does not contain the word codex.
-- a2a_client.py: standard-library client that reads the Agent Card, sends one
-  `SendStreamingMessage` request, and waits on its SSE response until the task
-  reaches a terminal state.
+- a2a_client.py: standard-library client that reads the Agent Card and can
+  either submit a task immediately (`--submit`), follow one task over SSE
+  (`--wait`), or perform the original one-call streaming interaction.
 - start-a2a-after-exit.sh: recommended safe foreground launcher on Linux.
 - start-a2a.sh: simple direct launcher when the conversation is already cleanly closed.
 - start-a2a.ps1: foreground launcher for Windows.
@@ -164,7 +170,8 @@ File roles:
 - HANDOFF.md: this complete operational document.
 - REMOTE_AGENT_PROMPT.md: copy-paste message for an agent with no prior context.
 
-The async branch uses the A2A SDK's streaming/task support. The upstream
+The durable branch uses the A2A SDK's streaming/task support and SQLite task
+store. The upstream
 protocol repository used for this implementation is:
 
 ~~~text
@@ -178,8 +185,8 @@ This GitHub repository is the complete custom bundle. Clone it first:
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin async-tasks
-git switch --track origin/async-tasks
+git fetch origin durable-async-tasks
+git switch --track origin/durable-async-tasks
 ~~~
 
 The upstream A2A repository is a protocol and SDK reference. It is not a
@@ -223,8 +230,8 @@ Clone this repository, which contains the complete custom bridge bundle:
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin async-tasks
-git switch --track origin/async-tasks
+git fetch origin durable-async-tasks
+git switch --track origin/durable-async-tasks
 ~~~
 
 The original A2A repository is optional. Clone it separately only if its source
@@ -245,7 +252,7 @@ python3 -m venv .venv
 The tested requirements file is:
 
 ~~~text
-a2a-sdk==1.2.2
+a2a-sdk[sqlite]==1.2.2
 fastapi==0.143.0
 sse-starlette==3.5.0
 uvicorn==0.54.0
@@ -373,15 +380,25 @@ The card contains:
 - streaming true. The bridge supports A2A task streaming over SSE.
 - Supported text input and output modes.
 
-The recommended client sends one `SendStreamingMessage` request. The response
-is a Server-Sent Events stream. It remains open while the task is submitted,
-queued behind another conversation write, and processed by Codex. The stream
-ends when the task reaches `COMPLETED`, `FAILED`, `CANCELED`, or `REJECTED`.
+There are two supported client modes:
+
+1. For long, uncertain, or disconnect-prone work, send `SendMessage` with
+   `configuration.returnImmediately: true`. The bridge returns a task ID and
+   keeps the worker running after that client process exits. Later,
+   `SubscribeToTask` follows the same task by ID until it reaches
+   `COMPLETED`, `FAILED`, `CANCELED`, or `REJECTED`.
+2. For a short task or a caller that can keep a connection open, send one
+   `SendStreamingMessage` request. The response is a Server-Sent Events stream
+   that remains open while the task is queued and processed by Codex.
+
+The included client uses `--submit` for the first mode and `--wait` for the
+later subscription. Its default two-argument form uses the second mode.
 
 There is no status polling. In particular, do not implement a loop such as
 "wait 20 minutes, call GetTask, wait 20 minutes again". That pattern can make
-one 21-minute task look like a 40-minute operation. Keep the one streaming
-request open instead.
+one 21-minute task look like a 40-minute operation. Use one long-lived SSE
+subscription instead. `--wait` uses `GetTask` only once if the task completed
+in the small race window before the subscription was attached; it never loops.
 
 This removes the bridge/client timeout; it cannot override a separate timeout
 imposed by the remote agent runtime, shell tool, reverse proxy, or firewall.
@@ -400,12 +417,15 @@ The remote agent must:
 5. Generate a new JSON-RPC request ID for every request.
 6. Generate a new A2A message ID for every message.
 7. Send only one request at a time.
-8. Use `SendStreamingMessage` and keep the SSE connection open until a
-   terminal task state arrives.
-9. Inspect each SSE JSON-RPC envelope for an `error` object, even when HTTP
-   status is 200.
-10. Avoid automatic retries if the stream disconnects; the Codex request may
-    already have been accepted and may still be running.
+8. For long or uncertain work, use `SendMessage` with
+   `configuration.returnImmediately: true`, save the returned task ID, and
+   later use `SubscribeToTask` for one SSE wait.
+9. For short work, `SendStreamingMessage` is also valid; keep that SSE
+   connection open until a terminal task state arrives.
+10. Inspect each JSON-RPC/SSE envelope for an `error` object, even when HTTP
+    status is 200.
+11. Avoid automatic retries or resubmission if a connection disconnects; the
+    Codex request may already have been accepted and may still be running.
 
 The remote agent does not need the server's Codex credentials or thread UUID.
 
@@ -414,6 +434,13 @@ The remote agent does not need the server's Codex credentials or thread UUID.
 Copy a2a_client.py to the remote machine. It uses only Python's standard library:
 
 ~~~bash
+# Preferred for long-running work: returns a taskId immediately.
+python3 a2a_client.py --submit "Long task for the Codex agent" "http://TAILSCALE-IP:8766"
+
+# Later, using the taskId printed by --submit:
+python3 a2a_client.py --wait "TASK-ID-FROM-SUBMIT" "http://TAILSCALE-IP:8766"
+
+# Convenient one-connection mode for a short request:
 python3 a2a_client.py "Hello. Please confirm that you received this message." "http://TAILSCALE-IP:8766"
 ~~~
 
@@ -423,20 +450,44 @@ On Windows:
 py a2a_client.py "Hello. Please confirm that you received this message." "http://TAILSCALE-IP:8766"
 ~~~
 
-The command remains occupied while Codex works. This is intentional and does
-not consume repeated model turns: the waiting happens in the client process,
-not by asking an agent to issue status questions.
+`--submit` exits after the bridge accepts the task, so the remote agent does
+not have to spend a tool call waiting. `--wait` later occupies one SSE
+connection; this is passive network waiting, not repeated model turns or status
+questions. The default one-connection form remains occupied until completion.
 
 ### cURL fallback
 
-If a2a_client.py is not available, use cURL:
+If `a2a_client.py` is not available, prefer this detached submission for long
+work. Generate fresh UUIDs for `REQUEST-UUID` and `MESSAGE-UUID`:
 
 ~~~bash
-curl -N -sS -X POST "http://TAILSCALE-IP:8766/" -H "Accept: text/event-stream" -H "Content-Type: application/json" -H "A2A-Version: 1.0" --data-raw '{"jsonrpc":"2.0","id":"NEW-REQUEST-UUID","method":"SendStreamingMessage","params":{"message":{"messageId":"NEW-MESSAGE-UUID","role":"ROLE_USER","contextId":"CONTEXT-ID-FROM-AGENT-CARD","parts":[{"text":"Hello. Please confirm that you received this message."}]}}}'
+curl -sS -X POST "http://TAILSCALE-IP:8766/" \
+  -H "Content-Type: application/json" -H "A2A-Version: 1.0" \
+  --data-raw '{"jsonrpc":"2.0","id":"REQUEST-UUID","method":"SendMessage","params":{"message":{"messageId":"MESSAGE-UUID","role":"ROLE_USER","contextId":"CONTEXT-ID-FROM-AGENT-CARD","parts":[{"text":"Long task for the Codex agent"}]},"configuration":{"returnImmediately":true}}}'
+~~~
+
+Save the returned `result.task.id` as `TASK-ID`. Later, attach once without
+resubmitting the message:
+
+~~~bash
+curl -N -sS -X POST "http://TAILSCALE-IP:8766/" \
+  -H "Accept: text/event-stream" -H "Content-Type: application/json" \
+  -H "A2A-Version: 1.0" \
+  --data-raw '{"jsonrpc":"2.0","id":"NEW-REQUEST-UUID","method":"SubscribeToTask","params":{"id":"TASK-ID"}}'
+~~~
+
+For a short direct request, cURL can use `SendStreamingMessage` instead:
+
+~~~bash
+curl -N -sS -X POST "http://TAILSCALE-IP:8766/" \
+  -H "Accept: text/event-stream" -H "Content-Type: application/json" \
+  -H "A2A-Version: 1.0" \
+  --data-raw '{"jsonrpc":"2.0","id":"NEW-REQUEST-UUID","method":"SendStreamingMessage","params":{"message":{"messageId":"NEW-MESSAGE-UUID","role":"ROLE_USER","contextId":"CONTEXT-ID-FROM-AGENT-CARD","parts":[{"text":"Hello. Please confirm that you received this message."}]}}}'
 ~~~
 
 The final answer normally appears in the `statusUpdate.status.message.parts`
-field of the final SSE envelope:
+field of the final SSE envelope. A JSON-RPC response can contain an `error`
+object even when HTTP status is 200:
 
 ~~~text
 result.statusUpdate.status.message.parts[].text
@@ -454,11 +505,17 @@ The A2A bridge for my existing Codex conversation is now running over Tailscale.
 Read the Agent Card first:
 http://TAILSCALE-IP:8766/.well-known/agent-card.json
 
-Use the endpoint and contextId announced by that card. Send one A2A 1.0
-JSON-RPC request with method SendStreamingMessage and keep the SSE response
-open until a terminal task state arrives. Do not poll GetTask between waits;
-the single stream is the wait mechanism, so a long Codex task does not acquire
-an additional status timeout.
+Use the endpoint and contextId announced by that card. For a long or
+uncertain request, use `SendMessage` with `returnImmediately: true`, save the
+returned task ID, and later attach with `SubscribeToTask`. The included client
+does this with:
+
+python3 a2a_client.py --submit "Your long request" "http://TAILSCALE-IP:8766"
+python3 a2a_client.py --wait "TASK-ID" "http://TAILSCALE-IP:8766"
+
+For a short request, `SendStreamingMessage` is also valid. In either case do
+not poll `GetTask` between waits and do not submit the same message again after
+a disconnect; one SSE subscription is the wait mechanism.
 
 Inspect every SSE JSON-RPC envelope for an error object. If the connection
 drops, do not resend automatically because Codex may already have processed
@@ -505,7 +562,15 @@ That command can kill the bridge or an active request.
 
 ### Normal stop
 
-Wait for the current response to finish and press Ctrl+C in the terminal running the bridge.
+The preferred stop is to wait for active work to finish and press Ctrl+C in the
+terminal running the bridge. A client process can exit safely after `--submit`;
+that does not stop the bridge worker.
+
+If the bridge must be stopped while a worker is active, press Ctrl+C once and
+allow the process to shut down. Do not resubmit that task immediately. On the
+next startup, the durable task store marks any task left non-terminal as
+failed, with a message telling the operator to inspect the Codex conversation
+before deciding whether the work needs to be submitted again.
 
 This stops the HTTP listener and preserves the Codex conversation history.
 
@@ -603,11 +668,18 @@ Always read the context ID from the Agent Card. Do not invent a new context ID f
 
 ### Long task or disconnected client
 
-The default Codex timeout is unlimited. The client keeps one SSE connection
-open and does not issue periodic status requests. If a task is still running,
-leave the bridge terminal open and inspect its logs. If a client connection
-drops, do not resend immediately: the original Codex process may still be
-writing the conversation. Check the bridge and conversation state first.
+The default Codex timeout is unlimited. For a task that may outlive the
+calling agent's tool timeout, use `--submit`, save the task ID, and let the
+client process exit. Later use `--wait` to open one SSE subscription. The
+bridge does not issue periodic status requests, and the client does not run a
+polling loop. If a wait connection drops, do not resend immediately: reattach
+with the same task ID. The original Codex process may still be writing the
+conversation.
+
+If the bridge itself restarts, completed tasks remain in SQLite. An active task
+from the previous process is deliberately marked failed on startup because a
+task record cannot prove whether Codex already performed side effects; inspect
+the conversation before resubmitting anything.
 
 ## 17. Security and scope
 
@@ -647,68 +719,19 @@ py -3.10 -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 ~~~
 
-Use the PowerShell launcher start-a2a.ps1:
-
-If start-a2a.ps1 is not already present in the bundle, create it next to
-a2a_bridge.py with this content:
+Use the PowerShell launcher already included in the repository:
 
 ~~~powershell
-param(
-    [Parameter(Mandatory = $true)]
-    [string]$ThreadId,
-    [string]$ContextId = "",
-    [int]$Port = 8766
-)
+.\start-a2a.ps1 -ThreadId "UUID-OF-THE-TARGET-CONVERSATION" -ContextId "codex-CONTEXT-SUFFIX"
+~~~
 
-$ErrorActionPreference = "Stop"
-$python = Join-Path $PSScriptRoot ".venv/Scripts/python.exe"
+It discovers the Tailscale IPv4 address, passes `--timeout 0` to the bridge,
+and prints the Agent Card URL plus copy-ready instructions before entering
+standby. For long work, use the client in detached mode:
 
-if (-not (Test-Path -LiteralPath $python)) {
-    throw "Missing virtual-environment Python: $python"
-}
-
-$tailscaleIp = (& tailscale ip -4 | Select-Object -First 1).Trim()
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tailscaleIp)) {
-    throw "Tailscale did not return an IPv4 address."
-}
-
-if ([string]::IsNullOrWhiteSpace($ContextId)) {
-    $compactId = $ThreadId.Replace("-", "")
-    if ($compactId.Length -lt 12) {
-        throw "ThreadId does not look like a UUID."
-    }
-    $ContextId = "codex-" + $compactId.Substring(0, 12)
-}
-
-$baseUrl = "http://" + $tailscaleIp + ":" + $Port
-$cardUrl = $baseUrl + "/.well-known/agent-card.json"
-$arguments = @(
-    (Join-Path $PSScriptRoot "a2a_bridge.py"),
-    "--host", $tailscaleIp,
-    "--port", "$Port",
-    "--base-url", $baseUrl,
-    "--thread-id", $ThreadId,
-    "--context-id", $ContextId,
-    "--timeout", "0"
-)
-
-Write-Host ""
-Write-Host "================ A2A connection instructions ================"
-Write-Host "Repository:      https://github.com/gustavo-avalos-villasenor/easy-codex-a2a"
-Write-Host "Branch:          async-tasks"
-Write-Host "Agent Card:      $cardUrl"
-Write-Host "JSON-RPC URL:    $baseUrl/"
-Write-Host "A2A context ID:  $ContextId"
-Write-Host ""
-Write-Host "Use a2a_client.py from the cloned async-tasks branch; it sends one"
-Write-Host "SendStreamingMessage request and waits on one SSE connection."
-Write-Host ""
-Write-Host "A2A bridge in foreground: $baseUrl"
-Write-Host "The process will remain in standby waiting for requests."
-Write-Host "Press Ctrl+C in this terminal to stop it."
-
-& $python @arguments
-exit $LASTEXITCODE
+~~~powershell
+py a2a_client.py --submit "Long task for the Codex agent" "http://TAILSCALE-IP:8766"
+py a2a_client.py --wait "TASK-ID-FROM-SUBMIT" "http://TAILSCALE-IP:8766"
 ~~~
 
 ~~~powershell
@@ -772,11 +795,13 @@ Remote agent:
 
 ~~~bash
 curl http://TAILSCALE-IP:8766/.well-known/agent-card.json
-python3 a2a_client.py "Message for the Codex conversation" "http://TAILSCALE-IP:8766"
+python3 a2a_client.py --submit "Message for the Codex conversation" "http://TAILSCALE-IP:8766"
+python3 a2a_client.py --wait "TASK-ID-FROM-SUBMIT" "http://TAILSCALE-IP:8766"
 ~~~
 
-The Python client blocks on one SSE connection until the final answer. It does
-not run a status-polling loop.
+For short work, the client can instead use its two-argument form, which blocks
+on one SSE connection until the final answer. Neither mode runs a status-
+polling loop.
 
 Stop:
 

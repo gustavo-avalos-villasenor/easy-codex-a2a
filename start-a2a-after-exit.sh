@@ -129,23 +129,26 @@ echo "Copy the following message to the remote agent:"
 cat <<EOF
 Clone and read this repository:
 https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
-Then select the async-tasks branch:
-git fetch origin async-tasks
-git switch --track origin/async-tasks
+Then select the durable-async-tasks branch:
+git fetch origin durable-async-tasks
+git switch --track origin/durable-async-tasks
 
 The bridge is serving the existing Codex conversation. Do not create a new
 conversation. First read this Agent Card:
 $card_url
 
-Use the endpoint and contextId announced by the Agent Card. Use the streaming
-A2A 1.0 JSON-RPC method SendStreamingMessage, one message at a time. Keep the
-single SSE connection open until the bridge sends a terminal task state. This
-client does not poll GetTask, so a long Codex task is not followed by another
-equally long status timeout. Do not retry automatically if a connection drops;
-the task may already be running.
+Use the endpoint and contextId announced by the Agent Card. For work that may
+take a long time, submit with SendMessage(returnImmediately=true), keep the
+returned taskId, and later attach with SubscribeToTask. The included client
+supports this with --submit and --wait. It does not poll GetTask, so a long
+Codex task is not followed by another equally long status timeout. Do not
+resubmit after a disconnect; the task may already be running.
 
-From the cloned repository, a test message can be sent with:
+For a normal one-connection request:
 python3 a2a_client.py "Hello. Please confirm that you received this message." "$base_url"
+
+For a detached request that returns immediately:
+python3 a2a_client.py --submit "Long task" "$base_url"
 EOF
 echo "=============================================================="
 echo

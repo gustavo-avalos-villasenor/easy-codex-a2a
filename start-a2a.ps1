@@ -40,7 +40,7 @@ $arguments = @(
 Write-Host ""
 Write-Host "================ A2A connection instructions ================"
 Write-Host "Repository:      https://github.com/gustavo-avalos-villasenor/easy-codex-a2a"
-Write-Host "Branch:          async-tasks"
+Write-Host "Branch:          durable-async-tasks"
 Write-Host "Agent Card:      $cardUrl"
 Write-Host "JSON-RPC URL:    $baseUrl/"
 Write-Host "A2A context ID:  $ContextId"
@@ -49,16 +49,16 @@ Write-Host "Copy this message to the remote agent:"
 Write-Host @"
 Clone and read this repository:
 https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
-Then select the async-tasks branch:
-git fetch origin async-tasks
-git switch --track origin/async-tasks
+Then select the durable-async-tasks branch:
+git fetch origin durable-async-tasks
+git switch --track origin/durable-async-tasks
 
 Read the Agent Card first:
 $cardUrl
 
-Use the announced contextId and send one SendStreamingMessage request. Keep
-the SSE connection open until a terminal task state; do not poll GetTask and
-do not retry automatically after a disconnect.
+Use the announced contextId. For long tasks, submit with --submit, keep the
+returned taskId, and later use --wait. Do not poll GetTask and do not resend
+after a disconnect.
 
 Test command from the cloned repository:
 python a2a_client.py "Hello. Please confirm that you received this message." "$baseUrl"
