@@ -26,6 +26,7 @@ if ([string]::IsNullOrWhiteSpace($ContextId)) {
 }
 
 $baseUrl = "http://" + $tailscaleIp + ":" + $Port
+$cardUrl = $baseUrl + "/.well-known/agent-card.json"
 $arguments = @(
     (Join-Path $PSScriptRoot "a2a_bridge.py"),
     "--host", $tailscaleIp,
@@ -33,11 +34,41 @@ $arguments = @(
     "--base-url", $baseUrl,
     "--thread-id", $ThreadId,
     "--context-id", $ContextId,
-    "--timeout", "240"
+    "--timeout", "0"
 )
 
+Write-Host ""
+Write-Host "================ A2A connection instructions ================"
+Write-Host "Repository:      https://github.com/gustavo-avalos-villasenor/easy-codex-a2a"
+Write-Host "Branch:          async-tasks"
+Write-Host "Agent Card:      $cardUrl"
+Write-Host "JSON-RPC URL:    $baseUrl/"
+Write-Host "A2A context ID:  $ContextId"
+Write-Host ""
+Write-Host "Copy this message to the remote agent:"
+Write-Host @"
+Clone and read this repository:
+https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
+Then select the async-tasks branch:
+git fetch origin async-tasks
+git switch --track origin/async-tasks
+
+Read the Agent Card first:
+$cardUrl
+
+Use the announced contextId and send one SendStreamingMessage request. Keep
+the SSE connection open until a terminal task state; do not poll GetTask and
+do not retry automatically after a disconnect.
+
+Test command from the cloned repository:
+python a2a_client.py "Hello. Please confirm that you received this message." "$baseUrl"
+"@
+Write-Host "=============================================================="
+Write-Host ""
 Write-Host "A2A bridge in foreground: $baseUrl"
+Write-Host "The process will remain in standby waiting for requests."
 Write-Host "Press Ctrl+C in this terminal to stop it."
+Write-Host ""
 
 & $python @arguments
 exit $LASTEXITCODE

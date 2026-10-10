@@ -129,16 +129,20 @@ echo "Copy the following message to the remote agent:"
 cat <<EOF
 Clone and read this repository:
 https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
+Then select the async-tasks branch:
+git fetch origin async-tasks
+git switch --track origin/async-tasks
 
 The bridge is serving the existing Codex conversation. Do not create a new
 conversation. First read this Agent Card:
 $card_url
 
-Use the endpoint and contextId announced by the Agent Card. Send A2A 1.0
-JSON-RPC requests with method SendMessage, one at a time. Generate new request
-and message UUIDs for every request. Wait up to 300 seconds and inspect the
-JSON-RPC body for errors even when HTTP status is 200. Do not retry blindly
-after a timeout.
+Use the endpoint and contextId announced by the Agent Card. Use the streaming
+A2A 1.0 JSON-RPC method SendStreamingMessage, one message at a time. Keep the
+single SSE connection open until the bridge sends a terminal task state. This
+client does not poll GetTask, so a long Codex task is not followed by another
+equally long status timeout. Do not retry automatically if a connection drops;
+the task may already be running.
 
 From the cloned repository, a test message can be sent with:
 python3 a2a_client.py "Hello. Please confirm that you received this message." "$base_url"
@@ -151,4 +155,4 @@ echo "Press Ctrl+C in this terminal to stop it."
 echo
 
 cd "$BRIDGE_DIR"
-exec .venv/bin/python a2a_bridge.py --host "$tailscale_ip" --port "$PORT" --base-url "$base_url" --thread-id "$THREAD_ID" --context-id "$CONTEXT_ID" --timeout 240
+exec .venv/bin/python a2a_bridge.py --host "$tailscale_ip" --port "$PORT" --base-url "$base_url" --thread-id "$THREAD_ID" --context-id "$CONTEXT_ID" --timeout 0

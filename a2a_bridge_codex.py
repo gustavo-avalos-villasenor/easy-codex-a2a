@@ -15,13 +15,14 @@ from uuid import UUID
 
 import uvicorn
 
-from a2a.helpers.proto_helpers import new_text_message
+from a2a.helpers.proto_helpers import new_text_status_update_event
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentCapabilities, AgentInterface, AgentSkill
-from a2a.utils.errors import InvalidParamsError
+from a2a.types.a2a_pb2 import Task, TaskState, TaskStatus
+from a2a.utils.errors import InvalidParamsError, UnsupportedOperationError
 from starlette.applications import Starlette
 
 
@@ -83,7 +84,12 @@ def codex_command() -> list[str]:
     )
 
 
-def ask_codex(prompt: str, thread_id: str, cwd: Path, timeout: int) -> str:
+def ask_codex(
+    prompt: str,
+    thread_id: str,
+    cwd: Path,
+    timeout: int | None,
+) -> str:
     """Resume exactly one existing thread and return its final response."""
 
     with tempfile.TemporaryDirectory(prefix="codex-a2a-") as temp_dir:
@@ -103,6 +109,7 @@ def ask_codex(prompt: str, thread_id: str, cwd: Path, timeout: int) -> str:
             thread_id,
             "-",
         ]
+        process_timeout = None if timeout is None or timeout <= 0 else timeout
         try:
             result = subprocess.run(
                 command,
@@ -111,13 +118,16 @@ def ask_codex(prompt: str, thread_id: str, cwd: Path, timeout: int) -> str:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
+                timeout=process_timeout,
                 cwd=cwd,
             )
         except subprocess.TimeoutExpired as exc:
-            logging.error("Codex excedió el límite de %s segundos.", timeout)
+            logging.error(
+                "Codex exceeded the configured limit of %s seconds.",
+                process_timeout,
+            )
             raise RuntimeError(
-                f"Codex excedió {timeout} segundos. Comprueba el estado antes de reintentar."
+                f"Codex exceeded {process_timeout} seconds. Check the state before retrying."
             ) from exc
 
         started_id = None
@@ -172,7 +182,7 @@ class CodexExecutor(AgentExecutor):
         thread_id: str,
         context_id: str,
         cwd: Path,
-        timeout: int,
+        timeout: int | None,
         demo: bool,
     ) -> None:
         self.thread_id = thread_id
@@ -187,31 +197,74 @@ class CodexExecutor(AgentExecutor):
         if not prompt.strip():
             raise ValueError("Envía un mensaje de texto no vacío.")
 
+        task_id = context.task_id
+        if not task_id or not context.context_id:
+            raise InvalidParamsError(
+                message="A2A did not provide a taskId and contextId for this request."
+            )
+
         requested_context = context.message.context_id if context.message else ""
         if requested_context != self.context_id:
             raise InvalidParamsError(
                 message=f"Este puente está dedicado al contextId {self.context_id}"
             )
 
-        async with self.lock:
-            if self.demo:
-                answer = "Demo A2A: " + prompt
-            else:
-                answer = await asyncio.to_thread(
-                    ask_codex,
-                    prompt,
-                    self.thread_id,
-                    self.cwd,
-                    self.timeout,
+        # Enter task mode immediately. The streaming endpoint can therefore
+        # return a Task while another request is still using the Codex writer.
+        # The lock serializes actual writes to the one existing conversation.
+        initial_task = Task(
+            id=task_id,
+            context_id=self.context_id,
+            status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+        )
+        if context.message:
+            initial_task.history.append(context.message)
+        await event_queue.enqueue_event(initial_task)
+
+        try:
+            async with self.lock:
+                await event_queue.enqueue_event(
+                    new_text_status_update_event(
+                        task_id=task_id,
+                        context_id=self.context_id,
+                        state=TaskState.TASK_STATE_WORKING,
+                        text="Codex is processing this request.",
+                    )
                 )
 
-        await event_queue.enqueue_event(
-            new_text_message(answer, context_id=self.context_id)
-        )
+                if self.demo:
+                    answer = "Demo A2A: " + prompt
+                else:
+                    answer = await asyncio.to_thread(
+                        ask_codex,
+                        prompt,
+                        self.thread_id,
+                        self.cwd,
+                        self.timeout,
+                    )
+
+            completed = new_text_status_update_event(
+                task_id=task_id,
+                context_id=self.context_id,
+                state=TaskState.TASK_STATE_COMPLETED,
+                text=answer,
+            )
+            await event_queue.enqueue_event(completed)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logging.exception("A2A task %s failed", task_id)
+            failed = new_text_status_update_event(
+                task_id=task_id,
+                context_id=self.context_id,
+                state=TaskState.TASK_STATE_FAILED,
+                text=f"Codex request failed: {exc}",
+            )
+            await event_queue.enqueue_event(failed)
 
     async def cancel(self, context, event_queue) -> None:
-        raise NotImplementedError(
-            "El puente procesa cada mensaje como una operación única."
+        raise UnsupportedOperationError(
+            "Individual task cancellation is not implemented; stop the foreground bridge with Ctrl+C."
         )
 
 
@@ -220,7 +273,7 @@ def create_app(
     thread_id: str,
     context_id: str,
     cwd: Path,
-    timeout: int,
+    timeout: int | None,
     demo: bool = False,
 ) -> Starlette:
     card = AgentCard(
@@ -237,7 +290,7 @@ def create_app(
                 protocol_version="1.0",
             )
         ],
-        capabilities=AgentCapabilities(streaming=False),
+        capabilities=AgentCapabilities(streaming=True),
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
         skills=[
@@ -266,7 +319,12 @@ def main() -> None:
     parser.add_argument("--base-url", required=True, help="URL visible to the client")
     parser.add_argument("--thread-id", required=True, help="UUID de la conversación Codex")
     parser.add_argument("--context-id", required=True, help="contextId A2A dedicado")
-    parser.add_argument("--timeout", type=int, default=240)
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=0,
+        help="Maximum Codex runtime in seconds; 0 means no limit (default).",
+    )
     parser.add_argument("--demo", action="store_true", help="echo sin llamar a Codex")
     args = parser.parse_args()
 
