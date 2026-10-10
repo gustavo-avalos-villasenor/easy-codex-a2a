@@ -2,18 +2,19 @@
 
 This is the complete operational handoff for exposing one existing Codex conversation as a remote A2A agent.
 
-This document describes the `durable-async-tasks` branch. It is intentionally
-separate from `main` and `async-tasks`, so both previous implementations remain
-available as rollback points. This durable branch is the version to use for
-long-running or disconnect-prone Codex work.
+This document describes the `async-resume-callback` branch. It is intentionally
+separate from `main`, `async-tasks`, and `durable-async-tasks`, so the previous
+implementations remain available as rollback points. This branch is the version
+to use when long-running work must not keep the calling Codex agent in a model
+turn while it waits.
 
 When cloning from GitHub, explicitly select this branch:
 
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin durable-async-tasks
-git switch --track origin/durable-async-tasks
+git fetch origin async-resume-callback
+git switch --track origin/async-resume-callback
 ~~~
 
 The remote agent can send messages to the existing Codex conversation and receive Codex replies directly. The user does not need to copy messages between agents after the bridge is running.
@@ -24,9 +25,13 @@ The remote agent can send messages to the existing Codex conversation and receiv
 Remote agent
     |
     | A2A 1.0 JSON-RPC submission over a private Tailscale connection
-    | returns a taskId immediately; a later SSE subscription follows it
+    | returns a taskId immediately
     v
-Python A2A bridge on the Codex host
+Detached watcher on the calling agent's host
+    |
+    | one SSE subscription, outside the model turn
+    v
+Python A2A bridge on the server Codex host
     |
     | Persistent A2A Task store + independent worker
     | codex --no-daemon exec resume THREAD_UUID
@@ -46,17 +51,18 @@ The bridge:
 - Keeps task execution independent from the HTTP client connection. A client
   may disconnect after receiving a task ID without canceling the worker.
 - Persists task state in SQLite so a later client can reattach by task ID.
-- Uses one SSE subscription for waiting; it does not poll `GetTask`.
+- Supports one SSE subscription for waiting; it does not poll `GetTask`.
 - Serializes requests so only one request writes to the conversation at a time.
 - Listens only on the server's Tailscale IP.
 - Runs in the foreground and stays waiting for requests.
 - Stops with Ctrl+C in the terminal running the bridge.
 
 The Codex subprocess timeout is unlimited by default. `--timeout 0` means no
-limit; a positive value is an optional safety limit in seconds. The remote
-client also uses an unlimited read wait after the stream is connected. A
-twenty-one-minute Codex task therefore remains one twenty-one-minute request;
-there is no additional twenty-minute `GetTask` request afterward.
+limit; a positive value is an optional safety limit in seconds. In callback
+mode, the calling agent submits and ends its model turn immediately. A
+detached local process holds the SSE connection and makes one Codex resume only
+after the task reaches a terminal state. The waiting process is not a model
+turn and does not periodically ask for status.
 
 Task metadata is stored in SQLite at `CODEX_HOME/a2a-bridge/tasks.sqlite3` by
 default. Set `A2A_TASK_DB` or pass `--task-db` to select another path. A
@@ -165,6 +171,7 @@ a2a-bridge/
 ├── a2a_bridge.py
 ├── a2a_bridge_codex.py
 ├── a2a_client.py
+├── test_async_resume.py
 ├── start-a2a.sh
 ├── start-a2a-after-exit.sh
 ├── start-a2a.ps1
@@ -176,8 +183,10 @@ File roles:
 - a2a_bridge_codex.py: actual A2A-to-Codex bridge.
 - a2a_bridge.py: wrapper entry point. Its filename intentionally does not contain the word codex.
 - a2a_client.py: standard-library client that reads the Agent Card and can
-  either submit a task immediately (`--submit`), follow one task over SSE
-  (`--wait`), or perform the original one-call streaming interaction.
+  submit immediately (`--submit`), submit and later resume the caller's Codex
+  conversation from a detached watcher (`--submit-and-resume`), follow one
+  task over SSE (`--wait`), or perform the original one-call streaming
+  interaction.
 - start-a2a-after-exit.sh: recommended safe foreground launcher on Linux.
 - start-a2a.sh: simple direct launcher when the conversation is already cleanly closed.
 - start-a2a.ps1: foreground launcher for Windows.
@@ -186,8 +195,7 @@ File roles:
 - HANDOFF.md: this complete operational document.
 - REMOTE_AGENT_PROMPT.md: copy-paste message for an agent with no prior context.
 
-The durable branch uses the A2A SDK's streaming/task support and SQLite task
-store. The upstream
+This branch uses the A2A SDK's streaming/task support and SQLite task store. The upstream
 protocol repository used for this implementation is:
 
 ~~~text
@@ -201,8 +209,8 @@ This GitHub repository is the complete custom bundle. Clone it first:
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin durable-async-tasks
-git switch --track origin/durable-async-tasks
+git fetch origin async-resume-callback
+git switch --track origin/async-resume-callback
 ~~~
 
 The upstream A2A repository is a protocol and SDK reference. It is not a
@@ -211,7 +219,7 @@ replacement for this repository.
 If the custom files must be transferred as an archive instead:
 
 ~~~bash
-tar -czf a2a-bridge-bundle.tar.gz HANDOFF.md README.md REMOTE_AGENT_PROMPT.md requirements.txt a2a_bridge.py a2a_bridge_codex.py a2a_client.py start-a2a.sh start-a2a-after-exit.sh start-a2a.ps1
+tar -czf a2a-bridge-bundle.tar.gz HANDOFF.md README.md REMOTE_AGENT_PROMPT.md requirements.txt a2a_bridge.py a2a_bridge_codex.py a2a_client.py test_async_resume.py start-a2a.sh start-a2a-after-exit.sh start-a2a.ps1
 ~~~
 
 ## 5. Server requirements
@@ -246,8 +254,8 @@ Clone this repository, which contains the complete custom bridge bundle:
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin durable-async-tasks
-git switch --track origin/durable-async-tasks
+git fetch origin async-resume-callback
+git switch --track origin/async-resume-callback
 ~~~
 
 The original A2A repository is optional. Clone it separately only if its source
@@ -402,29 +410,38 @@ The card contains:
 - streaming true. The bridge supports A2A task streaming over SSE.
 - Supported text input and output modes.
 
-There are two supported client modes:
+There are three supported client modes:
 
-1. For long, uncertain, or disconnect-prone work, send `SendMessage` with
-   `configuration.returnImmediately: true`. The bridge returns a task ID and
-   keeps the worker running after that client process exits. Later,
-   `SubscribeToTask` follows the same task by ID until it reaches
-   `COMPLETED`, `FAILED`, `CANCELED`, or `REJECTED`.
-2. For a short task or a caller that can keep a connection open, send one
+1. For long, uncertain, or disconnect-prone work from another Codex CLI
+   conversation, send `SendMessage` with
+   `configuration.returnImmediately: true` through
+   `--submit-and-resume`. The client starts a detached local watcher, returns
+   immediately, and the watcher resumes the caller's Codex conversation once
+   after the task reaches `COMPLETED`, `FAILED`, `CANCELED`, or `REJECTED`.
+2. For long work from a client that cannot resume a Codex conversation, use
+   `--submit` and later `SubscribeToTask` with `--wait`. The bridge returns a
+   task ID and keeps the worker running after the submitting process exits.
+3. For a short task or a caller that can keep a connection open, send one
    `SendStreamingMessage` request. The response is a Server-Sent Events stream
    that remains open while the task is queued and processed by Codex.
 
-The included client uses `--submit` for the first mode and `--wait` for the
-later subscription. Its default two-argument form uses the second mode.
+The included client uses `--submit-and-resume` for the first mode, `--submit`
+and `--wait` for the second mode, and its default two-argument form for the
+third mode.
 
 There is no status polling. In particular, do not implement a loop such as
 "wait 20 minutes, call GetTask, wait 20 minutes again". That pattern can make
 one 21-minute task look like a 40-minute operation. Use one long-lived SSE
-subscription instead. `--wait` uses `GetTask` only once if the task completed
-in the small race window before the subscription was attached; it never loops.
+subscription instead. The detached watcher uses one SSE subscription and
+reconnects only after a network/stream failure; it never polls `GetTask`.
+`--wait` uses `GetTask` only once if the task completed in the small race window
+before the subscription was attached; it never loops.
 
-This removes the bridge/client timeout; it cannot override a separate timeout
-imposed by the remote agent runtime, shell tool, reverse proxy, or firewall.
-Those external layers must also permit long-lived HTTP/SSE connections.
+Callback mode removes the model-turn wait from the calling agent, but it cannot
+override a firewall or an OS/network failure. Its watcher must remain alive and
+the remote agent's host must keep the same user, `CODEX_HOME`, Codex login, and
+Codex CLI available until completion. A detached watcher can reconnect without
+creating another A2A task.
 
 An HTTP 200 response can still contain a JSON-RPC error. Always inspect the JSON body.
 
@@ -439,14 +456,18 @@ The remote agent must:
 5. Generate a new JSON-RPC request ID for every request.
 6. Generate a new A2A message ID for every message.
 7. Send only one request at a time.
-8. For long or uncertain work, use `SendMessage` with
-   `configuration.returnImmediately: true`, save the returned task ID, and
-   later use `SubscribeToTask` for one SSE wait.
-9. For short work, `SendStreamingMessage` is also valid; keep that SSE
+8. For long or uncertain work from a Codex CLI conversation, prefer
+   `--submit-and-resume` with this agent's own current conversation UUID. It
+   returns immediately and a detached watcher resumes the same conversation
+   once with the terminal result.
+9. If the client cannot provide a Codex conversation UUID, use `SendMessage`
+   with `configuration.returnImmediately: true`, save the returned task ID,
+   and later use `SubscribeToTask` for one SSE wait.
+10. For short work, `SendStreamingMessage` is also valid; keep that SSE
    connection open until a terminal task state arrives.
-10. Inspect each JSON-RPC/SSE envelope for an `error` object, even when HTTP
+11. Inspect each JSON-RPC/SSE envelope for an `error` object, even when HTTP
     status is 200.
-11. Avoid automatic retries or resubmission if a connection disconnects; the
+12. Avoid automatic retries or resubmission if a connection disconnects; the
     Codex request may already have been accepted and may still be running.
 
 The remote agent does not need the server's Codex credentials or thread UUID.
@@ -456,10 +477,15 @@ The remote agent does not need the server's Codex credentials or thread UUID.
 Copy a2a_client.py to the remote machine. It uses only Python's standard library:
 
 ~~~bash
-# Preferred for long-running work: returns a taskId immediately.
-python3 a2a_client.py --submit "Long task for the Codex agent" "http://TAILSCALE-IP:8766"
+# Preferred for long-running work from another Codex CLI conversation.
+# Use this agent's own current conversation UUID, not the server UUID.
+python3 a2a_client.py --submit-and-resume \
+  "Long task for the Codex agent" \
+  "http://TAILSCALE-IP:8766" \
+  "THIS-AGENT-CODEX-CONVERSATION-UUID"
 
-# Later, using the taskId printed by --submit:
+# Portable fallback when this client cannot resume a Codex conversation:
+python3 a2a_client.py --submit "Long task for the Codex agent" "http://TAILSCALE-IP:8766"
 python3 a2a_client.py --wait "TASK-ID-FROM-SUBMIT" "http://TAILSCALE-IP:8766"
 
 # Convenient one-connection mode for a short request:
@@ -472,10 +498,46 @@ On Windows:
 py a2a_client.py "Hello. Please confirm that you received this message." "http://TAILSCALE-IP:8766"
 ~~~
 
-`--submit` exits after the bridge accepts the task, so the remote agent does
-not have to spend a tool call waiting. `--wait` later occupies one SSE
-connection; this is passive network waiting, not repeated model turns or status
-questions. The default one-connection form remains occupied until completion.
+`--submit-and-resume` exits after the bridge accepts the task. The detached
+watcher waits outside the model runtime and later invokes `codex exec resume`
+once on this same client conversation. The returned JSON includes the task ID,
+watcher PID, state file, and log file. Let the current Codex turn finish and do
+not reopen this conversation in another UI while the callback may still arrive.
+
+`--submit` exits without starting a callback. `--wait` later occupies one SSE
+connection; it avoids status polling but may still cause the calling agent's
+runtime to re-enter its model turn when its own tool timeout expires. The
+default one-connection form remains occupied until completion.
+
+### Callback mode contract
+
+`--submit-and-resume` requires the caller to be a Codex CLI conversation on the
+same machine where the command runs. `CLIENT-CODEX-CONVERSATION-UUID` is the
+caller's UUID, not the server's UUID. The watcher discovers that conversation's
+original working directory from its local `CODEX_HOME`; an optional fourth
+argument can override it:
+
+~~~bash
+python3 a2a_client.py --submit-and-resume \
+  "Long task" "http://TAILSCALE-IP:8766" \
+  "CLIENT-CODEX-CONVERSATION-UUID" \
+  "/the/caller/working/directory"
+~~~
+
+The command writes a private state JSON and log under
+`~/.a2a-client/tasks/` (or `A2A_CLIENT_STATE_DIR`). The state file records the
+task ID, watcher PID, terminal result, callback attempts, and final callback
+status. The watcher is intentionally a separate process, so closing the shell
+that launched the short submission command does not cancel it. The client host
+must remain powered on, keep the same `CODEX_HOME`, and keep Codex CLI
+authenticated until the task completes.
+
+The watcher never re-submits the original A2A message. If the callback's Codex
+conversation is still owned by the original turn or an interactive UI, it
+waits 30 seconds and retries the single callback. Close the conversation's
+interactive owner. If the watcher host is shut down, inspect the task ID and
+state before deciding whether to restart a watcher; never blindly submit the
+original message again.
 
 ### cURL fallback
 
@@ -527,10 +589,18 @@ The A2A bridge for my existing Codex conversation is now running over Tailscale.
 Read the Agent Card first:
 http://TAILSCALE-IP:8766/.well-known/agent-card.json
 
-Use the endpoint and contextId announced by that card. For a long or
-uncertain request, use `SendMessage` with `returnImmediately: true`, save the
-returned task ID, and later attach with `SubscribeToTask`. The included client
-does this with:
+Use the endpoint and contextId announced by that card. If you are running as a
+Codex CLI agent, obtain your own current conversation UUID and use the callback
+mode for a long or uncertain request:
+
+python3 a2a_client.py --submit-and-resume "Your long request" "http://TAILSCALE-IP:8766" "YOUR-CODEX-CONVERSATION-UUID"
+
+The command returns immediately. A detached watcher waits outside the model
+turn and resumes this same conversation once with the task result. Do not run
+`--wait` or send the request again. Close the client conversation after the
+submission so its writer lock is available.
+
+If you cannot provide a Codex conversation UUID, use the portable task-ID mode:
 
 python3 a2a_client.py --submit "Your long request" "http://TAILSCALE-IP:8766"
 python3 a2a_client.py --wait "TASK-ID" "http://TAILSCALE-IP:8766"
@@ -585,8 +655,15 @@ That command can kill the bridge or an active request.
 ### Normal stop
 
 The preferred stop is to wait for active work to finish and press Ctrl+C in the
-terminal running the bridge. A client process can exit safely after `--submit`;
-that does not stop the bridge worker.
+terminal running the bridge. A client process can exit safely after
+`--submit-and-resume`; that does not stop the bridge worker or its detached
+watcher.
+
+Stopping the server bridge does not automatically stop a callback watcher on
+the client host. If a callback watcher is still active, let it finish or stop
+that client-side process using the PID and log path printed by
+`--submit-and-resume`. Stopping the watcher does not cancel the server task;
+keep the task ID and do not submit the same request again.
 
 If the bridge must be stopped while a worker is active, press Ctrl+C once and
 allow the process to shut down. Do not resubmit that task immediately. On the
@@ -691,12 +768,17 @@ Always read the context ID from the Agent Card. Do not invent a new context ID f
 ### Long task or disconnected client
 
 The default Codex timeout is unlimited. For a task that may outlive the
-calling agent's tool timeout, use `--submit`, save the task ID, and let the
-client process exit. Later use `--wait` to open one SSE subscription. The
-bridge does not issue periodic status requests, and the client does not run a
-polling loop. If a wait connection drops, do not resend immediately: reattach
-with the same task ID. The original Codex process may still be writing the
-conversation.
+calling agent's tool timeout, use `--submit-and-resume` with the caller's own
+Codex conversation UUID. The submitting command exits, and a detached watcher
+later resumes that conversation once. The watcher does not issue periodic
+status requests; it reconnects only after a broken SSE connection. If the
+watcher reports an error, inspect its state JSON and log before deciding what
+to do. Never resubmit automatically.
+
+If the caller cannot resume a Codex conversation, use `--submit`, save the task
+ID, and later use `--wait` to open one SSE subscription. This still avoids a
+polling loop, but the calling agent may consume tokens if its own runtime
+re-enters the model while waiting.
 
 If the bridge itself restarts, completed tasks remain in SQLite. An active task
 from the previous process is deliberately marked failed on startup because a
@@ -756,12 +838,17 @@ Use the PowerShell launcher already included in the repository:
 
 It discovers the Tailscale IPv4 address, passes `--timeout 0` to the bridge,
 and prints the Agent Card URL plus copy-ready instructions before entering
-standby. For long work, use the client in detached mode:
+standby. For long work from a Codex CLI client, use callback mode with that
+client's own conversation UUID:
 
 ~~~powershell
-py a2a_client.py --submit "Long task for the Codex agent" "http://TAILSCALE-IP:8766"
-py a2a_client.py --wait "TASK-ID-FROM-SUBMIT" "http://TAILSCALE-IP:8766"
+py a2a_client.py --submit-and-resume "Long task for the Codex agent" "http://TAILSCALE-IP:8766" "CLIENT-CODEX-CONVERSATION-UUID"
 ~~~
+
+This returns immediately and starts a detached watcher. It later resumes the
+client conversation once, outside the model turn. Do not run `--wait` or
+resubmit the same request. If the client cannot provide a Codex conversation
+UUID, use the portable `--submit` plus `--wait` mode instead.
 
 ~~~powershell
 .\start-a2a.ps1 -ThreadId "UUID-OF-THE-TARGET-CONVERSATION" -ContextId "codex-CONTEXT-SUFFIX"
@@ -824,13 +911,17 @@ Remote agent:
 
 ~~~bash
 curl http://TAILSCALE-IP:8766/.well-known/agent-card.json
-python3 a2a_client.py --submit "Message for the Codex conversation" "http://TAILSCALE-IP:8766"
-python3 a2a_client.py --wait "TASK-ID-FROM-SUBMIT" "http://TAILSCALE-IP:8766"
+python3 a2a_client.py --submit-and-resume \
+  "Message for the Codex conversation" \
+  "http://TAILSCALE-IP:8766" \
+  "THIS-AGENT-CODEX-CONVERSATION-UUID"
 ~~~
 
-For short work, the client can instead use its two-argument form, which blocks
-on one SSE connection until the final answer. Neither mode runs a status-
-polling loop.
+The callback command returns immediately; its detached watcher resumes the
+client conversation once when the result is ready. For a client without a Codex
+conversation UUID, use `--submit` followed later by `--wait`. For short work,
+the two-argument form blocks on one SSE connection until the final answer.
+None of these modes runs a periodic status-polling loop.
 
 Stop:
 

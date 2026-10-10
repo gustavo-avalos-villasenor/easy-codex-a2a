@@ -129,26 +129,36 @@ echo "Copy the following message to the remote agent:"
 cat <<EOF
 Clone and read this repository:
 https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
-Then select the durable-async-tasks branch:
-git fetch origin durable-async-tasks
-git switch --track origin/durable-async-tasks
+Then select the async-resume-callback branch:
+git fetch origin async-resume-callback
+git switch --track origin/async-resume-callback
 
 The bridge is serving the existing Codex conversation. Do not create a new
 conversation. First read this Agent Card:
 $card_url
 
 Use the endpoint and contextId announced by the Agent Card. For work that may
-take a long time, submit with SendMessage(returnImmediately=true), keep the
-returned taskId, and later attach with SubscribeToTask. The included client
-supports this with --submit and --wait. It does not poll GetTask, so a long
-Codex task is not followed by another equally long status timeout. Do not
-resubmit after a disconnect; the task may already be running.
+take a long time, obtain the remote agent's own current Codex conversation UUID
+and use callback mode:
+python3 a2a_client.py --submit-and-resume "Long task" "$base_url" "CLIENT-CODEX-CONVERSATION-UUID"
+
+This sends SendMessage(returnImmediately=true), starts a detached watcher, and
+returns immediately. The watcher uses one SubscribeToTask connection outside
+the model turn, then resumes the remote Codex conversation once when the task
+finishes. It does not poll GetTask. Do not run --wait or resubmit the same
+message. The remote conversation must be closed after submission so its writer
+lock is available; the watcher retries if it is still active.
+
+If the remote agent cannot resume its own Codex conversation, use the portable
+task-ID mode instead:
+python3 a2a_client.py --submit "Long task" "$base_url"
+python3 a2a_client.py --wait "TASK-ID-FROM-SUBMIT" "$base_url"
 
 For a normal one-connection request:
 python3 a2a_client.py "Hello. Please confirm that you received this message." "$base_url"
 
-For a detached request that returns immediately:
-python3 a2a_client.py --submit "Long task" "$base_url"
+For a detached request that resumes the caller automatically:
+python3 a2a_client.py --submit-and-resume "Long task" "$base_url" "CLIENT-CODEX-CONVERSATION-UUID"
 EOF
 echo "=============================================================="
 echo

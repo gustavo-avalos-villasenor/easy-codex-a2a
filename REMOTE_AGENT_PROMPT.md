@@ -5,9 +5,9 @@ Send the following message to an agent that has no prior context:
 ~~~text
 Clone and read this repository first:
 https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
-After cloning, select the durable-async-tasks branch:
-git fetch origin durable-async-tasks
-git switch --track origin/durable-async-tasks
+After cloning, select the async-resume-callback branch:
+git fetch origin async-resume-callback
+git switch --track origin/async-resume-callback
 
 It contains the complete A2A bridge for an existing Codex conversation,
 including the upstream A2A repository reference, Python bridge, client,
@@ -28,16 +28,36 @@ After the server shares the Agent Card URL, read:
 http://TAILSCALE-IP:8766/.well-known/agent-card.json
 
 Use the endpoint and contextId announced by that card. For a long or uncertain
-request, use the included standard-library client in two phases:
+request, use callback mode if this is a Codex CLI conversation. First obtain
+this agent's own current conversation UUID from the runtime context, then run:
+
+python3 a2a_client.py --submit-and-resume "Your request" \
+  "http://TAILSCALE-IP:8766" "THIS-AGENT-CODEX-CONVERSATION-UUID"
+
+--submit-and-resume sends SendMessage with returnImmediately=true and exits
+immediately. It starts a detached watcher outside the model turn. The watcher
+uses one SubscribeToTask SSE connection, does not poll GetTask, and resumes this
+same Codex conversation once when the remote result is terminal. After the
+command returns, let this conversation turn finish and do not run --wait or
+resubmit the request. The watcher state and log paths are printed in its JSON
+response. The watcher uses the same user, CODEX_HOME, Codex login, and working
+directory as this agent.
+
+The callback conversation must not remain open in Codex Desktop or VS Code.
+If its writer lock is still held when the remote task finishes, the watcher
+waits and retries; close the interactive owner rather than starting another
+submission.
+
+If this agent is not a Codex CLI conversation or cannot provide its own UUID,
+use the portable task-ID mode instead:
 
 python3 a2a_client.py --submit "Your request" "http://TAILSCALE-IP:8766"
 python3 a2a_client.py --wait "TASK-ID-RETURNED-BY-SUBMIT" "http://TAILSCALE-IP:8766"
 
---submit sends SendMessage with returnImmediately=true. Save the returned
-taskId. The bridge keeps processing after this client process exits. --wait
-uses one SubscribeToTask SSE connection later; it does not poll GetTask. This
-is the preferred mode when the work can outlive the calling agent's tool
-timeout.
+--wait uses one SubscribeToTask SSE connection later; it does not poll
+GetTask, but the calling agent may still consume tokens if its runtime has to
+re-enter the model repeatedly while waiting. Prefer --submit-and-resume for
+long work.
 
 For a short request, the one-connection form is also valid:
 

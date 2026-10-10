@@ -40,7 +40,7 @@ $arguments = @(
 Write-Host ""
 Write-Host "================ A2A connection instructions ================"
 Write-Host "Repository:      https://github.com/gustavo-avalos-villasenor/easy-codex-a2a"
-Write-Host "Branch:          durable-async-tasks"
+Write-Host "Branch:          async-resume-callback"
 Write-Host "Agent Card:      $cardUrl"
 Write-Host "JSON-RPC URL:    $baseUrl/"
 Write-Host "A2A context ID:  $ContextId"
@@ -49,16 +49,26 @@ Write-Host "Copy this message to the remote agent:"
 Write-Host @"
 Clone and read this repository:
 https://github.com/gustavo-avalos-villasenor/easy-codex-a2a
-Then select the durable-async-tasks branch:
-git fetch origin durable-async-tasks
-git switch --track origin/durable-async-tasks
+Then select the async-resume-callback branch:
+git fetch origin async-resume-callback
+git switch --track origin/async-resume-callback
 
 Read the Agent Card first:
 $cardUrl
 
-Use the announced contextId. For long tasks, submit with --submit, keep the
-returned taskId, and later use --wait. Do not poll GetTask and do not resend
-after a disconnect.
+Use the announced contextId. For long tasks, obtain this agent's own current
+Codex conversation UUID and run:
+python a2a_client.py --submit-and-resume "Long task" "$baseUrl" "CLIENT-CODEX-CONVERSATION-UUID"
+
+This returns immediately and starts a detached watcher outside the model turn.
+The watcher uses one SubscribeToTask connection, does not poll GetTask, and
+resumes the client Codex conversation once when the task finishes. Do not run
+--wait or resend the request. Close the client conversation after submission;
+the watcher retries if its writer lock is still active.
+
+If the client cannot provide a Codex conversation UUID, use:
+python a2a_client.py --submit "Long task" "$baseUrl"
+python a2a_client.py --wait "TASK-ID-FROM-SUBMIT" "$baseUrl"
 
 Test command from the cloned repository:
 python a2a_client.py "Hello. Please confirm that you received this message." "$baseUrl"

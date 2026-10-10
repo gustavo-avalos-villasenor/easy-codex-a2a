@@ -1,12 +1,14 @@
 # Easy Codex A2A
 
 This repository exposes one existing Codex conversation as a durable A2A 1.0
-agent over a private Tailscale connection. The `durable-async-tasks` branch
-supports two safe waiting modes:
+agent over a private Tailscale connection. The `async-resume-callback` branch
+adds a callback mode to the durable task implementation:
 
-- `--submit` returns a task ID immediately. The bridge continues the Codex
-  work after the remote client exits; `--wait TASK_ID` attaches later over one
-  SSE connection.
+- `--submit-and-resume` returns immediately. A detached local watcher waits for
+  the task outside the model turn and resumes the calling Codex conversation
+  once when the result is ready. This is the recommended mode for long work.
+- `--submit` still returns a task ID immediately, and `--wait TASK_ID` remains
+  available for clients that cannot resume a Codex CLI conversation.
 - The default client command sends one streaming request and keeps one SSE
   connection open until completion.
 
@@ -14,14 +16,15 @@ There is no periodic status polling. Completed tasks persist in SQLite across
 bridge restarts. A task active during a bridge restart is marked failed on the
 next startup rather than silently duplicated.
 
-Use branch `durable-async-tasks`; `main` remains the original rollback version
-and `async-tasks` is the earlier streaming-only version:
+Use branch `async-resume-callback`; `main` remains the original rollback version,
+`async-tasks` is the earlier streaming-only version, and
+`durable-async-tasks` is the previous durable version:
 
 ~~~bash
 git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
 cd easy-codex-a2a
-git fetch origin durable-async-tasks
-git switch --track origin/durable-async-tasks
+git fetch origin async-resume-callback
+git switch --track origin/async-resume-callback
 ~~~
 
 Repository used for the protocol and SDK:
@@ -70,8 +73,25 @@ Do not use Ctrl+Z or pkill -f codex.
 Send the remote agent the contents of REMOTE_AGENT_PROMPT.md, together with
 the Tailscale IP printed by the server launcher.
 
-For long or uncertain work, the remote agent should detach submission from
-waiting:
+For long or uncertain work, a remote Codex CLI agent should submit and let the
+detached watcher resume its own conversation when the task completes:
+
+~~~bash
+python3 a2a_client.py --submit-and-resume \
+  "Long task for the Codex agent" \
+  "http://TAILSCALE-IP:8766" \
+  "CLIENT-CODEX-CONVERSATION-UUID"
+~~~
+
+That command returns immediately. It starts a non-model watcher process, which
+holds one SSE connection without consuming model tokens. When the task reaches
+a terminal state, the watcher resumes `CLIENT-CODEX-CONVERSATION-UUID` once with
+the result. The client conversation must be closed after submission so its
+writer lock is available; if it is still open, the watcher retries every 30
+seconds. Do not run `--wait` or submit the same message again.
+
+If the remote agent cannot resume a Codex CLI conversation, use the portable
+task-ID mode instead:
 
 ~~~bash
 python3 a2a_client.py --submit "Long task for the Codex agent" "http://TAILSCALE-IP:8766"
