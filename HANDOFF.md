@@ -383,6 +383,10 @@ There is no status polling. In particular, do not implement a loop such as
 one 21-minute task look like a 40-minute operation. Keep the one streaming
 request open instead.
 
+This removes the bridge/client timeout; it cannot override a separate timeout
+imposed by the remote agent runtime, shell tool, reverse proxy, or firewall.
+Those external layers must also permit long-lived HTTP/SSE connections.
+
 An HTTP 200 response can still contain a JSON-RPC error. Always inspect the JSON body.
 
 ## 11. Remote agent instructions
