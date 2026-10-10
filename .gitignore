@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .env
 *.log
+bridge.py
+bridge_admin.py
+conversation_context.json
