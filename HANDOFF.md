@@ -176,17 +176,18 @@ codex login status must report an authenticated session.
 
 ## 6. Install from scratch on Linux
 
-Clone the original A2A repository if it is needed as a reference or for the SDK source:
+Clone this repository, which contains the complete custom bridge bundle:
 
 ~~~bash
-git clone --depth 1 https://github.com/a2aproject/a2a.git
+git clone https://github.com/gustavo-avalos-villasenor/easy-codex-a2a.git
+cd easy-codex-a2a
 ~~~
 
-Place the custom bridge bundle in a separate directory:
+The original A2A repository is optional. Clone it separately only if its source
+or documentation is needed:
 
 ~~~bash
-mkdir -p ~/a2a-bridge
-cd ~/a2a-bridge
+git clone --depth 1 https://github.com/a2aproject/a2a.git a2a-upstream
 ~~~
 
 Create the virtual environment:
@@ -250,8 +251,8 @@ First leave the interactive Codex conversation:
 Then run from a normal shell:
 
 ~~~bash
-cd /home/test/a2a-bridge
-./start-a2a-after-exit.sh
+cd easy-codex-a2a
+./start-a2a-after-exit.sh UUID-OF-THE-CURRENT-CONVERSATION 8766 codex-CONTEXT-ID
 ~~~
 
 For another conversation, pass explicit values:
@@ -300,7 +301,7 @@ from this document. The tested UUID is shown only as a reference.
 If the conversation is already closed and there is no old daemon or lock, the bridge can be started directly:
 
 ~~~bash
-cd /home/test/a2a-bridge
+cd easy-codex-a2a
 TAILSCALE_IP="$(tailscale ip -4 | head -n 1)"
 .venv/bin/python a2a_bridge.py --host "$TAILSCALE_IP" --port 8766 --base-url "http://$TAILSCALE_IP:8766" --thread-id "CURRENT_THREAD_UUID" --context-id "CURRENT_CONTEXT_ID" --timeout 240
 ~~~
@@ -410,8 +411,8 @@ Give the server user these instructions:
 3. Close Codex Desktop, VS Code, or any other application that has that chat open.
 4. Open a normal shell.
 5. Run:
-   cd /home/test/a2a-bridge
-   ./start-a2a-after-exit.sh
+   cd easy-codex-a2a
+   ./start-a2a-after-exit.sh UUID-OF-THE-CURRENT-CONVERSATION 8766 codex-CONTEXT-ID
 6. Leave that terminal open. It is intentionally occupied in standby.
 7. Give the remote agent the Agent Card URL printed by the bridge.
 8. Do not write manually in the same Codex conversation while the bridge is active.
@@ -445,8 +446,8 @@ This stops the HTTP listener and preserves the Codex conversation history.
 4. Run:
 
 ~~~bash
-cd /home/test/a2a-bridge
-./start-a2a-after-exit.sh
+cd easy-codex-a2a
+./start-a2a-after-exit.sh UUID-OF-THE-CURRENT-CONVERSATION 8766 codex-CONTEXT-ID
 ~~~
 
 ### Old detached screen bridge
@@ -479,7 +480,7 @@ Inspect the lock without deleting it:
 
 ~~~bash
 THREAD_ID="CURRENT_THREAD_UUID"
-lsof "$HOME/.codex/thread-writer-locks/THREAD_ID.lock"
+lsof "$HOME/.codex/thread-writer-locks/$THREAD_ID.lock"
 ~~~
 
 Replace THREAD_ID in the path with the actual UUID. Never delete the lock file as a workaround.
@@ -681,8 +682,8 @@ Server user:
 
 ~~~bash
 /exit
-cd /home/test/a2a-bridge
-./start-a2a-after-exit.sh
+cd easy-codex-a2a
+./start-a2a-after-exit.sh UUID-OF-THE-CURRENT-CONVERSATION 8766 codex-CONTEXT-ID
 ~~~
 
 Remote agent:
